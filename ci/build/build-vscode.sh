@@ -119,10 +119,25 @@ EOF
   ) > product.json
 
 
-  VSCODE_QUALITY=stable npm run gulp compile-copilot-extension-full-build
-
   npm run gulp core-ci
   npm run gulp "vscode-reh-web-$VSCODE_TARGET${MINIFY:+-min}-ci"
+
+  # The source build must keep the editor extensions and must not ship the
+  # built-in Copilot extension or its dedicated packaging output.
+  node --input-type=module -e '
+    import fs from "node:fs";
+    const root = `../vscode-reh-web-${process.env.VSCODE_TARGET}`;
+    const required = ["git", "typescript-language-features", "json-language-features", "markdown-language-features", "terminal-suggest"];
+    const missing = required.filter((name) => !fs.existsSync(`${root}/extensions/${name}/package.json`));
+    if (missing.length) {
+      console.error(`missing required extensions: ${missing.join(", ")}`);
+      process.exit(1);
+    }
+    if (fs.existsSync(`${root}/extensions/copilot`) || fs.existsSync(".build/extensions/copilot")) {
+      console.error("built-in Copilot extension was packaged");
+      process.exit(1);
+    }
+  '
 
   # Reset so if you develop after building you will not be stuck with the wrong
   # commit (the dev client will use `oss-dev` but the dev server will still use

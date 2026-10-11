@@ -25,8 +25,6 @@
     "prettier": "prettier --write --log-level=warn --cache .",
     "preinstall": "node ./ci/dev/preinstall.js",
     "postinstall": "./ci/dev/postinstall.sh",
-    "publish:npm": "./ci/steps/publish-npm.sh",
-    "publish:docker": "./ci/steps/docker-buildx-push.sh",
     "fmt": "npm run prettier && ./ci/dev/doctoc.sh",
     "lint:scripts": "./ci/dev/lint-scripts.sh",
     "lint:ts": "eslint --max-warnings=0 --fix $(git ls-files '*.ts' '*.js' | grep -v 'lib/vscode')",

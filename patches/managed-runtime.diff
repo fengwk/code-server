@@ -1,0 +1,240 @@
+Refresh stale configuration-backed workspace snapshots and exclude built-in Copilot from the source build
+
+Index: code-server/lib/vscode/build/gulpfile.reh.ts
+===================================================================
+--- code-server.orig/lib/vscode/build/gulpfile.reh.ts
++++ code-server/lib/vscode/build/gulpfile.reh.ts
+@@ -23,14 +23,14 @@ import glob from 'glob';
+ import { promisify } from 'util';
+ import rceditCallback from 'rcedit';
+ import { compileApiProposalNamesTask, copyCodiconsTask } from './lib/compilation.ts';
+-import { cleanExtensionsBuildTask, compileNonNativeExtensionsBuildTask, compileNativeExtensionsBuildTask, compileExtensionMediaBuildTask, compileCopilotExtensionBuildTask } from './gulpfile.extensions.ts';
++import { cleanExtensionsBuildTask, compileNonNativeExtensionsBuildTask, compileNativeExtensionsBuildTask, compileExtensionMediaBuildTask } from './gulpfile.extensions.ts';
+ import * as cp from 'child_process';
+ import crypto from 'crypto';
+ import log from 'fancy-log';
+ import { runEsbuildBundle, getBootstrapEntryPointsForTarget } from './lib/esbuild.ts';
+ import { fetchUrls } from './lib/fetch.ts';
+ import { downloadFeedPackage } from './lib/azureFeed.ts';
+-import { ensureCopilotPlatformPackage, getCopilotExcludeFilter, getCopilotRuntimePrebuildFiles, getCopilotTgrepExcludeFilter, getMxcExcludeFilter, getRipgrepExcludeFilter, prepareBuiltInCopilotRipgrepShim } from './lib/copilot.ts';
++import { getMxcExcludeFilter, getRipgrepExcludeFilter } from './lib/copilot.ts';
+ import { readAgentSdkResults } from './agent-sdk/common.ts';
+ 
+ 
+@@ -293,7 +293,7 @@ function packageTask(type: string, platform: string, arch: string, sourceFolderN
+ 				const manifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, extensionPath)).toString());
+ 				return !isUIExtension(manifest);
+ 			}).map((extensionPath) => path.basename(path.dirname(extensionPath)))
+-			.filter(name => name !== 'vscode-api-tests' && name !== 'vscode-test-resolver'); // Do not ship the test extensions
++			.filter(name => name !== 'vscode-api-tests' && name !== 'vscode-test-resolver' && name !== 'copilot'); // Do not ship the test extensions or the built-in Copilot extension.
+ 		const builtInExtensions: Array<{ name: string; platforms?: string[]; clientOnly?: boolean }> = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'product.json'), 'utf8')).builtInExtensions;
+ 		const marketplaceExtensions = builtInExtensions
+ 			.filter(entry => !entry.platforms || new Set(entry.platforms).has(platform))
+@@ -359,11 +359,7 @@ function packageTask(type: string, platform: string, arch: string, sourceFolderN
+ 			.pipe(filter(['**', '!**/package-lock.json', '!**/*.{js,css}.map']))
+ 			.pipe(util.cleanNodeModules(path.join(import.meta.dirname, '.moduleignore')))
+ 			.pipe(util.cleanNodeModules(path.join(import.meta.dirname, `.moduleignore.${process.platform}`)));
+-		ensureCopilotPlatformPackage(platform, arch, 'remote/node_modules');
+-		const copilotRuntimePrebuilds = gulp.src(getCopilotRuntimePrebuildFiles(platform, arch, 'remote/node_modules'), { base: 'remote', dot: true, allowEmpty: true });
+-		const deps = es.merge(cleanedDeps, copilotRuntimePrebuilds)
+-			.pipe(filter(getCopilotExcludeFilter(platform, arch)))
+-			.pipe(filter(getCopilotTgrepExcludeFilter(platform, arch)))
++		const deps = cleanedDeps
+ 			.pipe(filter(getRipgrepExcludeFilter(platform, arch)))
+ 			.pipe(filter(getMxcExcludeFilter(arch)))
+ 			.pipe(jsFilter)
+@@ -521,16 +517,6 @@ function patchWin32DependenciesTask(destinationFolderName: string) {
+ 	};
+ }
+ 
+-function prepareCopilotRipgrepShimTaskREH(platform: string, arch: string, destinationFolderName: string) {
+-	return async () => {
+-		const outputDir = path.join(BUILD_ROOT, destinationFolderName);
+-		const nodeModulesDir = path.join(outputDir, 'node_modules');
+-
+-		const builtInCopilotExtensionDir = path.join(outputDir, 'extensions', 'copilot');
+-		prepareBuiltInCopilotRipgrepShim(platform, arch, builtInCopilotExtensionDir, nodeModulesDir);
+-	};
+-}
+-
+ ['reh', 'reh-web'].forEach(type => {
+ 	const target = type === 'reh' ? 'server' : 'server-web';
+ 	const esbuildBundleTask = task.define(`esbuild-vscode-${type}`, () => runEsbuildBundle(`out-vscode-${type}`, false, true, target));
+@@ -549,8 +535,7 @@ function prepareCopilotRipgrepShimTaskREH(platform: string, arch: string, destin
+ 				compileNativeExtensionsBuildTask,
+ 				task.task(`node-${platform}-${arch}`) as task.Task,
+ 				util.rimraf(path.join(BUILD_ROOT, destinationFolderName)),
+-				packageTask(type, platform, arch, sourceFolderName, destinationFolderName),
+-				prepareCopilotRipgrepShimTaskREH(platform, arch, destinationFolderName)
++				packageTask(type, platform, arch, sourceFolderName, destinationFolderName)
+ 			];
+ 
+ 			if (platform === 'win32') {
+@@ -565,7 +550,6 @@ function prepareCopilotRipgrepShimTaskREH(platform: string, arch: string, destin
+ 				compileApiProposalNamesTask,
+ 				cleanExtensionsBuildTask,
+ 				compileNonNativeExtensionsBuildTask,
+-				compileCopilotExtensionBuildTask,
+ 				compileExtensionMediaBuildTask,
+ 				writeISODate('out-build'),
+ 				minified ? esbuildBundleMinTask : esbuildBundleTask,
+Index: code-server/lib/vscode/src/vs/platform/workspace/common/workspace.ts
+===================================================================
+--- code-server.orig/lib/vscode/src/vs/platform/workspace/common/workspace.ts
++++ code-server/lib/vscode/src/vs/platform/workspace/common/workspace.ts
+@@ -378,6 +378,10 @@ export class Workspace implements IWorkspace {
+ 		return this._transient;
+ 	}
+ 
++	set transient(transient: boolean) {
++		this._transient = transient;
++	}
++
+ 	get configuration(): URI | null {
+ 		return this._configuration;
+ 	}
+Index: code-server/lib/vscode/src/vs/workbench/services/configuration/browser/configurationService.ts
+===================================================================
+--- code-server.orig/lib/vscode/src/vs/workbench/services/configuration/browser/configurationService.ts
++++ code-server/lib/vscode/src/vs/workbench/services/configuration/browser/configurationService.ts
+@@ -563,6 +563,15 @@ export class WorkspaceService extends Disposable implements IWorkbenchConfigurat
+ 			previousFolders = this.workspace.folders;
+ 			this.workspace.update(workspace);
+ 		} else {
++			// The configuration can finish loading after the workspace snapshot
++			// was taken and before it is assigned. Refresh only a configuration-backed
++			// snapshot that is still marked uninitialized; single-folder and empty
++			// workspaces are already complete and have no workspace file to read.
++			if (!workspace.initialized && workspace.configuration && this.workspaceConfiguration.initialized) {
++				workspace.transient = this.workspaceConfiguration.isTransient();
++				workspace.folders = toWorkspaceFolders(this.workspaceConfiguration.getFolders(), workspace.configuration, this.uriIdentityService.extUri);
++				workspace.initialized = true;
++			}
+ 			this.workspace = workspace;
+ 		}
+ 
+Index: code-server/lib/vscode/src/vs/workbench/services/configuration/test/browser/configurationService.test.ts
+===================================================================
+--- code-server.orig/lib/vscode/src/vs/workbench/services/configuration/test/browser/configurationService.test.ts
++++ code-server/lib/vscode/src/vs/workbench/services/configuration/test/browser/configurationService.test.ts
+@@ -14,7 +14,7 @@ import { getGlobalConfigurationValue } from '../../../../../platform/agentHost/c
+ import { ConfigurationDefaultOverridesContribution, WorkspaceService } from '../../browser/configurationService.js';
+ import { ConfigurationEditingErrorCode } from '../../common/configurationEditing.js';
+ import { IFileService } from '../../../../../platform/files/common/files.js';
+-import { IWorkspaceContextService, WorkbenchState, IWorkspaceFoldersChangeEvent, ISingleFolderWorkspaceIdentifier, IWorkspaceIdentifier } from '../../../../../platform/workspace/common/workspace.js';
++import { IWorkspaceContextService, WorkbenchState, IWorkspaceFoldersChangeEvent, ISingleFolderWorkspaceIdentifier, IWorkspaceIdentifier, Workspace } from '../../../../../platform/workspace/common/workspace.js';
+ import { ConfigurationTarget, IConfigurationService, IConfigurationChangeEvent } from '../../../../../platform/configuration/common/configuration.js';
+ import { workbenchInstantiationService, RemoteFileSystemProvider, TestEnvironmentService, TestTextFileService } from '../../../../test/browser/workbenchTestServices.js';
+ import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
+@@ -1268,6 +1268,111 @@ suite('WorkspaceService - Initialization', () => {
+ 		testObject.acquireInstantiationService(instantiationService);
+ 	});
+ 
++	// The workspace snapshot can be taken before the workspace file has loaded.
++	// A configuration that finishes in that window must replace the snapshot,
++	// including its folder lookup map and transient flag, before initialization
++	// is marked complete.
++	test('refreshes a configuration-backed workspace snapshot when configuration initializes before assignment', async () => {
++		const workspaceService = testObject as unknown as {
++			workspaceConfiguration: {
++				initialized: boolean;
++				getFolders(): { path: string }[];
++				isTransient(): boolean;
++			};
++			updateWorkspaceAndInitializeConfiguration(workspace: Workspace & { initialized: boolean }, trigger: boolean): Promise<void>;
++		};
++		const configuration = workspaceService.workspaceConfiguration;
++		const initializedDuringCreate = configuration.initialized;
++		const folder = joinPath(ROOT, 'a');
++		const workspace = new Workspace('stale-snapshot', [], false, configResource, () => false) as Workspace & { initialized: boolean };
++		workspace.initialized = false;
++		let initializedDuringAssignment: boolean | undefined;
++		const originalGetFolders = configuration.getFolders.bind(configuration);
++		configuration.getFolders = () => {
++			initializedDuringAssignment = configuration.initialized;
++			return originalGetFolders();
++		};
++		configuration.initialized = true;
++		const originalIsTransient = configuration.isTransient.bind(configuration);
++		configuration.isTransient = () => true;
++
++		try {
++			await workspaceService.updateWorkspaceAndInitializeConfiguration(workspace, false);
++		} finally {
++			configuration.initialized = initializedDuringCreate;
++			configuration.getFolders = originalGetFolders;
++			configuration.isTransient = originalIsTransient;
++		}
++
++		assert.strictEqual(initializedDuringCreate, false);
++		assert.strictEqual(initializedDuringAssignment, true);
++		assert.strictEqual(workspace.initialized, true);
++		assert.strictEqual(workspace.transient, true);
++		assert.deepStrictEqual(workspace.folders.map(item => item.uri.toString()), [folder.toString(), joinPath(ROOT, 'b').toString()]);
++		assert.strictEqual(workspace.getFolder(joinPath(folder, 'file.txt'))?.uri.toString(), folder.toString());
++		assert.strictEqual(testObject.getWorkspace().folders.map(item => item.uri.toString()).join(','), workspace.folders.map(item => item.uri.toString()).join(','));
++	});
++
++	test('keeps a configuration-backed workspace snapshot when configuration is still uninitialized', async () => {
++		const workspaceService = testObject as unknown as {
++			workspaceConfiguration: { initialized: boolean };
++			updateWorkspaceAndInitializeConfiguration(workspace: Workspace & { initialized: boolean }, trigger: boolean): Promise<void>;
++		};
++		const configuration = workspaceService.workspaceConfiguration;
++		const initializedDuringCreate = configuration.initialized;
++		const workspace = new Workspace('uninitialized-snapshot', [], false, configResource, () => false) as Workspace & { initialized: boolean };
++		workspace.initialized = false;
++		configuration.initialized = false;
++
++		try {
++			await workspaceService.updateWorkspaceAndInitializeConfiguration(workspace, false);
++		} finally {
++			configuration.initialized = initializedDuringCreate;
++		}
++
++		assert.strictEqual(workspace.initialized, false);
++		assert.deepStrictEqual(workspace.folders, []);
++		assert.strictEqual(workspace.getFolder(joinPath(ROOT, 'a', 'file.txt')), null);
++	});
++
++	test('does not replace a single-folder or empty workspace from workspace configuration', async () => {
++		const workspaceService = testObject as unknown as {
++			workspaceConfiguration: {
++				initialized: boolean;
++				getFolders(): { path: string }[];
++			};
++			updateWorkspaceAndInitializeConfiguration(workspace: Workspace & { initialized: boolean }, trigger: boolean): Promise<void>;
++		};
++		const configuration = workspaceService.workspaceConfiguration;
++		const initializedDuringCreate = configuration.initialized;
++		const singleFolderUri = joinPath(ROOT, 'a');
++		const singleFolder = new Workspace('single-folder', [{ uri: singleFolderUri, name: 'a', index: 0, toResource: relativePath => joinPath(singleFolderUri, relativePath) }], false, null, () => false) as Workspace & { initialized: boolean };
++		singleFolder.initialized = true;
++		const emptyWorkspace = new Workspace('empty-workspace', [], false, null, () => false) as Workspace & { initialized: boolean };
++		emptyWorkspace.initialized = true;
++		let folderReads = 0;
++		const originalGetFolders = configuration.getFolders.bind(configuration);
++		configuration.getFolders = () => {
++			folderReads++;
++			return originalGetFolders();
++		};
++		configuration.initialized = true;
++
++		try {
++			await workspaceService.updateWorkspaceAndInitializeConfiguration(singleFolder, false);
++			await workspaceService.updateWorkspaceAndInitializeConfiguration(emptyWorkspace, true);
++		} finally {
++			configuration.initialized = initializedDuringCreate;
++			configuration.getFolders = originalGetFolders;
++		}
++
++		assert.strictEqual(folderReads, 0);
++		assert.deepStrictEqual(singleFolder.folders.map(item => item.uri.toString()), [singleFolderUri.toString()]);
++		assert.strictEqual(singleFolder.getFolder(joinPath(singleFolderUri, 'file.txt'))?.uri.toString(), singleFolderUri.toString());
++		assert.deepStrictEqual(emptyWorkspace.folders, []);
++		assert.strictEqual(emptyWorkspace.getFolder(joinPath(ROOT, 'a', 'file.txt')), null);
++	});
++
+ 	(isMacintosh ? test.skip : test)('initialize a folder workspace from an empty workspace with no configuration changes', () => runWithFakedTimers<void>({ useFakeTimers: true }, async () => {
+ 
+ 		await fileService.writeFile(userDataProfileService.currentProfile.settingsResource, VSBuffer.fromString('{ "initialization.testSetting1": "userValue" }'));

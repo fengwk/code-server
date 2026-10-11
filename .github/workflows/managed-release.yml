@@ -1,0 +1,310 @@
+name: Managed release
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the existing tag. Dispatch without this input only builds.
+        type: boolean
+        default: false
+  push:
+    tags:
+      - v4.141.0-kk.1
+
+permissions:
+  contents: write
+
+concurrency:
+  group: managed-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            asset: linux-amd64
+            os: linux
+            arch: amd64
+            vscode_target: linux-x64
+            npm_arch: x64
+          - runner: ubuntu-22.04-arm
+            asset: linux-arm64
+            os: linux
+            arch: arm64
+            vscode_target: linux-arm64
+            npm_arch: arm64
+          - runner: windows-2022
+            asset: windows-amd64
+            os: windows
+            arch: amd64
+            vscode_target: win32-x64
+            npm_arch: x64
+          - runner: macos-15-intel
+            asset: macos-amd64
+            os: macos
+            arch: amd64
+            vscode_target: darwin-x64
+            npm_arch: x64
+          - runner: macos-latest
+            asset: macos-arm64
+            os: macos
+            arch: arm64
+            vscode_target: darwin-arm64
+            npm_arch: arm64
+    env:
+      VERSION: 4.141.0-kk.1
+      OS: ${{ matrix.os }}
+      ARCH: ${{ matrix.arch }}
+      VSCODE_ARCH: ${{ matrix.npm_arch }}
+      VSCODE_TARGET: ${{ matrix.vscode_target }}
+      npm_config_arch: ${{ matrix.npm_arch }}
+      npm_config_build_from_source: true
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Keep repository line endings
+        if: matrix.os == 'windows'
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          submodules: true
+
+      - name: Require Node 24 from both version sources
+        run: |
+          set -euo pipefail
+          code_server=$(tr -d '[:space:]' < .node-version)
+          vscode=$(tr -d '[:space:]' < lib/vscode/.nvmrc)
+          case "$code_server" in 24.*) ;; *) echo "code-server Node is not 24: $code_server" >&2; exit 1 ;; esac
+          case "$vscode" in 24.*) ;; *) echo "VS Code Node is not 24: $vscode" >&2; exit 1 ;; esac
+          echo "CODE_SERVER_NODE=$code_server" >> "$GITHUB_ENV"
+          echo "VSCODE_NODE=$vscode" >> "$GITHUB_ENV"
+
+      - name: Install Linux build dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y quilt libkrb5-dev pkg-config python3 make g++
+
+      - name: Install macOS build dependencies
+        if: matrix.os == 'macos'
+        run: brew install python-setuptools quilt
+
+      - name: Apply patches
+        run: |
+          set -euo pipefail
+          if command -v quilt >/dev/null; then
+            quilt push -a
+          else
+            while read -r patch; do
+              case "$patch" in '' | '#'*) continue ;; esac
+              git apply --whitespace=nowarn "patches/$patch"
+            done < patches/series
+          fi
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            test/package-lock.json
+
+      - name: Let Windows npm and jq run the build scripts
+        if: matrix.os == 'windows'
+        run: |
+          set -euo pipefail
+          echo "npm_config_script_shell=$(cygpath -w "$(command -v bash)")" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/shim"
+          cat > "$RUNNER_TEMP/shim/jq" <<'SHIM'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          args=()
+          for arg in "$@"; do
+            case $arg in
+              /dev/fd/* | /proc/*/fd/*)
+                copy=$(mktemp)
+                cat "$arg" > "$copy"
+                args+=("$copy")
+                ;;
+              *) args+=("$arg") ;;
+            esac
+          done
+          exec jq.exe "${args[@]}"
+          SHIM
+          chmod +x "$RUNNER_TEMP/shim/jq"
+          echo "$RUNNER_TEMP/shim" >> "$GITHUB_PATH"
+          sdk=$(ls -d "/c/Program Files (x86)/Windows Kits/10/bin"/*/x64 | sort -V | tail -1)
+          test -x "$sdk/signtool.exe"
+          cygpath -w "$sdk" >> "$GITHUB_PATH"
+          cmd.exe /c "C:\msys64\usr\bin\pacman -Sy --noconfirm --needed rsync"
+          cat > "$RUNNER_TEMP/shim/rsync" <<'SHIM'
+          #!/usr/bin/env bash
+          exec /c/msys64/usr/bin/rsync.exe "$@"
+          SHIM
+          chmod +x "$RUNNER_TEMP/shim/rsync"
+
+      - name: Build from source
+        run: |
+          set -euo pipefail
+          cd lib/vscode/build
+          npm ci
+          cd ..
+          if [[ "$OS" == linux ]]; then
+            source ./build/azure-pipelines/linux/setup-env.sh
+          fi
+          node build/npm/preinstall.ts
+          npm ci
+          cd ../..
+          npm ci
+          npm run build
+          npm run build:vscode
+          KEEP_MODULES=1 npm run release
+          node --input-type=module -e '
+            import { spawnSync } from "node:child_process";
+            import fs from "node:fs";
+            const release = "release";
+            const binary = process.env.OS === "windows" ? `${release}/lib/node.exe` : `${release}/lib/node`;
+            if (!fs.existsSync(binary)) throw new Error(`bundled Node is missing: ${binary}`);
+            const version = spawnSync(binary, ["--version"], { encoding: "utf8" });
+            if (version.status !== 0 || !String(version.stdout).startsWith("v24.")) {
+              throw new Error(`bundled runtime is not Node 24: ${version.stdout || version.stderr}`);
+            }
+            const nativeRoot = `${release}/node_modules`;
+            const natives = [];
+            const visit = (dir) => {
+              for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                const child = `${dir}/${entry.name}`;
+                if (entry.isDirectory()) visit(child);
+                else if (entry.name.endsWith(".node")) natives.push(child);
+              }
+            };
+            visit(nativeRoot);
+            if (!natives.length) throw new Error("no native module was built");
+            for (const native of natives) {
+              const loaded = spawnSync(binary, ["--input-type=module", "-e", `import { createRequire } from "node:module"; createRequire(import.meta.url)(${JSON.stringify(native)});`], { encoding: "utf8" });
+              if (loaded.status !== 0) throw new Error(`native module failed to load: ${native}\n${loaded.stderr}`);
+            }
+          '
+          npm run package
+
+      - name: Record source metadata
+        if: matrix.asset == 'linux-amd64'
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg upstreamTag "v4.141.0" \
+            --arg forkCommit "$(git rev-parse HEAD)" \
+            --arg submoduleCommit "$(git -C lib/vscode rev-parse HEAD)" \
+            --arg nodeVersion "$CODE_SERVER_NODE" \
+            --arg vscodeNodeVersion "$VSCODE_NODE" \
+            --arg os "$OS" \
+            --arg arch "$ARCH" \
+            '{upstreamTag:$upstreamTag, forkCommit:$forkCommit, submoduleCommit:$submoduleCommit, nodeVersion:$nodeVersion, vscodeNodeVersion:$vscodeNodeVersion, os:$os, arch:$arch}' \
+            > "release-packages/code-server-$VERSION-source.json"
+
+      - name: Smoke the built server
+        if: matrix.os != 'windows'
+        run: |
+          set -euo pipefail
+          port=$(node -e 'const s=require("net").createServer(); s.listen(0,"127.0.0.1",()=>{console.log(s.address().port); s.close()});')
+          first=$(mktemp -d)
+          second=$(mktemp -d)
+          password=$(openssl rand -hex 16)
+          start_server() {
+            local dir="$1"
+            release/bin/code-server \
+              --auth password \
+              --bind-addr "127.0.0.1:$port" \
+              --user-data-dir "$dir/user" \
+              --extensions-dir "$dir/extensions" \
+              "$dir/workspace" > "$dir/server.log" 2>&1 &
+            echo $! > "$dir/server.pid"
+            for _ in $(seq 1 60); do
+              if curl --silent --fail --max-time 2 "http://127.0.0.1:$port/healthz" >/dev/null; then
+                return 0
+              fi
+              sleep 1
+            done
+            cat "$dir/server.log" >&2
+            return 1
+          }
+          stop_server() {
+            local dir="$1"
+            if [[ -f "$dir/server.pid" ]]; then
+              kill "$(cat "$dir/server.pid")" || true
+              wait "$(cat "$dir/server.pid")" || true
+            fi
+          }
+          export PASSWORD="$password"
+          mkdir -p "$first/workspace" "$second/workspace"
+          start_server "$first"
+          curl --silent --fail --max-time 10 "http://127.0.0.1:$port/login" >/dev/null
+          stop_server "$first"
+          start_server "$second"
+          curl --silent --fail --max-time 10 "http://127.0.0.1:$port/login" >/dev/null
+          stop_server "$second"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: code-server-${{ env.VERSION }}-${{ matrix.asset }}
+          path: release-packages/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: package
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: code-server-4.141.0-kk.1-*
+          merge-multiple: true
+          path: release-packages
+      - name: Publish without replacing an existing release or asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v4.141.0-kk.1
+          VERSION: 4.141.0-kk.1
+        run: |
+          set -euo pipefail
+          expected=(
+            "code-server-$VERSION-linux-amd64.tar.gz"
+            "code-server-$VERSION-linux-amd64.tar.gz.sha256"
+            "code-server-$VERSION-linux-arm64.tar.gz"
+            "code-server-$VERSION-linux-arm64.tar.gz.sha256"
+            "code-server-$VERSION-windows-amd64.tar.gz"
+            "code-server-$VERSION-windows-amd64.tar.gz.sha256"
+            "code-server-$VERSION-macos-amd64.tar.gz"
+            "code-server-$VERSION-macos-amd64.tar.gz.sha256"
+            "code-server-$VERSION-macos-arm64.tar.gz"
+            "code-server-$VERSION-macos-arm64.tar.gz.sha256"
+            "code-server-$VERSION-source.json"
+          )
+          for asset in "${expected[@]}"; do
+            test -s "release-packages/$asset"
+            if [[ "$asset" == *.sha256 ]]; then
+              (cd release-packages && sha256sum --check "${asset##*/}")
+            fi
+          done
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists and will not be replaced" >&2
+            exit 1
+          fi
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --verify-tag \
+            release-packages/*
