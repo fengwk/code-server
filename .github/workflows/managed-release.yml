@@ -14,7 +14,7 @@ on:
       - v*-kk.*
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: managed-release-${{ github.ref }}
@@ -169,13 +169,22 @@ jobs:
           chmod +x "$RUNNER_TEMP/shim/rsync"
 
       - name: Build from source
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          node -e 'process.stdout.write("::add-mask::" + Buffer.from(process.env.GITHUB_TOKEN).toString("base64") + "\n")'
           cd lib/vscode/build
           npm ci
           cd ..
-          if [[ "$OS" == linux ]]; then
+          if [[ "$OS" == linux && "$ARCH" == amd64 ]]; then
             source ./build/azure-pipelines/linux/setup-env.sh
+          elif [[ "$OS" == linux ]]; then
+            # Upstream sysroot compilers run on x86_64, not this native ARM64 host.
+            export CC=gcc CXX=g++
+            export CXXFLAGS="-std=gnu++20"
+            export VSCODE_REMOTE_CC=gcc VSCODE_REMOTE_CXX=g++
+            export VSCODE_REMOTE_CXXFLAGS="-std=gnu++20"
           fi
           node build/npm/preinstall.ts
           npm ci

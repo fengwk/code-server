@@ -44,6 +44,17 @@ describe("managed release", () => {
     assert.ok(workflow.includes("already exists and will not be replaced"))
   })
 
+  // Source downloads need authenticated API access; package jobs never need
+  // release write permissions or an x86_64 compiler on their ARM64 host.
+  it("uses read-only authenticated source downloads and host-compatible ARM64 compilers", () => {
+    assert.match(workflow, /permissions:\n  contents: read/)
+    assert.match(workflow, /name: Build from source\n        env:\n          GITHUB_TOKEN: \$\{\{ github.token \}\}/)
+    assert.ok(workflow.includes("::add-mask::"))
+    assert.ok(workflow.includes('if [[ "$OS" == linux && "$ARCH" == amd64 ]]'))
+    assert.ok(workflow.includes("export CC=gcc CXX=g++"))
+    assert.ok(workflow.includes("export VSCODE_REMOTE_CC=gcc VSCODE_REMOTE_CXX=g++"))
+  })
+
   // Packaging is the upstream source release plus an archive. It must not grow
   // a second package format or silently omit checksums.
   it("packages only the platform archive and checksum", () => {
