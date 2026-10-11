@@ -114,7 +114,7 @@ Index: code-server/lib/vscode/src/vs/workbench/services/configuration/test/brows
  
  suite('ConfigurationDefaultOverridesContribution', () => {
  
-@@ -1436,6 +1437,132 @@ suite('WorkspaceService - Initialization', () => {
+@@ -1436,6 +1437,129 @@ suite('WorkspaceService - Initialization', () => {
  
  });
  
@@ -124,10 +124,11 @@ Index: code-server/lib/vscode/src/vs/workbench/services/configuration/test/brows
 +	const root = URI.file('snapshot-tests').with({ scheme: 'vscode-snapshot-tests' });
 +	let fileService: FileService;
 +	let fileSystemProvider: InMemoryFileSystemProvider;
++	type SnapshotWorkspace = Workspace & { initialized: boolean };
 +	type AssignmentService = Pick<WorkspaceService, 'initialize' | 'getWorkspace'> & {
-+		workspace: Workspace | undefined;
++		workspace: SnapshotWorkspace | undefined;
 +		workspaceConfiguration: WorkspaceConfiguration;
-+		updateWorkspaceAndInitializeConfiguration(workspace: Workspace, trigger: boolean): Promise<void>;
++		updateWorkspaceAndInitializeConfiguration(workspace: SnapshotWorkspace, trigger: boolean): Promise<void>;
 +	};
 +
 +	setup(() => {
@@ -186,8 +187,7 @@ Index: code-server/lib/vscode/src/vs/workbench/services/configuration/test/brows
 +		await fileService.createFolder(folder);
 +		const identifier = await writeWorkspace('middle.code-workspace', JSON.stringify({ folders: [{ path: 'middle' }], transient: true }));
 +		const workspaceService = createService();
-+		const snapshot = new Workspace(identifier.id, [], false, identifier.configPath);
-+		snapshot.initialized = false;
++		const snapshot = Object.assign(new Workspace(identifier.id, [], false, identifier.configPath, () => false), { initialized: false });
 +		await workspaceService.workspaceConfiguration.initialize(identifier, true);
 +		assert.strictEqual(workspaceService.workspace, undefined);
 +		assert.strictEqual(workspaceService.workspaceConfiguration.initialized, true);
@@ -205,8 +205,7 @@ Index: code-server/lib/vscode/src/vs/workbench/services/configuration/test/brows
 +		await fileService.createFolder(folder);
 +		const identifier = await writeWorkspace('late.code-workspace', JSON.stringify({ folders: [{ path: 'late' }] }));
 +		const workspaceService = createService();
-+		const snapshot = new Workspace(identifier.id, [], false, identifier.configPath);
-+		snapshot.initialized = false;
++		const snapshot = Object.assign(new Workspace(identifier.id, [], false, identifier.configPath, () => false), { initialized: false });
 +		const pending = workspaceService.updateWorkspaceAndInitializeConfiguration(snapshot, false);
 +		assert.strictEqual(snapshot.initialized, false);
 +		assert.deepStrictEqual(snapshot.folders, []);
@@ -219,8 +218,7 @@ Index: code-server/lib/vscode/src/vs/workbench/services/configuration/test/brows
 +		const identifier = await writeWorkspace('empty.code-workspace', JSON.stringify({ folders: [] }));
 +		const workspaceService = createService();
 +		await workspaceService.workspaceConfiguration.initialize(identifier, true);
-+		const snapshot = new Workspace(identifier.id, [], false, identifier.configPath);
-+		snapshot.initialized = false;
++		const snapshot = Object.assign(new Workspace(identifier.id, [], false, identifier.configPath, () => false), { initialized: false });
 +		const pending = workspaceService.updateWorkspaceAndInitializeConfiguration(snapshot, false);
 +		assert.strictEqual(snapshot.initialized, true);
 +		assert.deepStrictEqual(workspaceService.getWorkspace().folders, []);
@@ -234,8 +232,7 @@ Index: code-server/lib/vscode/src/vs/workbench/services/configuration/test/brows
 +		const identifier = await writeWorkspace('other.code-workspace', JSON.stringify({ folders: [] }));
 +		const workspaceService = createService();
 +		await workspaceService.workspaceConfiguration.initialize(identifier, true);
-+		const snapshot = new Workspace('single', [toWorkspaceFolder(folder)], false, null);
-+		snapshot.initialized = true;
++		const snapshot = Object.assign(new Workspace('single', [toWorkspaceFolder(folder)], false, null, () => false), { initialized: true });
 +		const pending = workspaceService.updateWorkspaceAndInitializeConfiguration(snapshot, false);
 +		assert.strictEqual(snapshot.initialized, true);
 +		assert.strictEqual(workspaceService.getWorkspace().configuration, null);
