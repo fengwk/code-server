@@ -8,8 +8,10 @@ on:
         type: boolean
         default: false
   push:
+    branches:
+      - kk-studio
     tags:
-      - v4.141.0-kk.1
+      - v*-kk.*
 
 permissions:
   contents: write
@@ -58,7 +60,6 @@ jobs:
             vscode_target: darwin-arm64
             npm_arch: arm64
     env:
-      VERSION: 4.141.0-kk.1
       OS: ${{ matrix.os }}
       ARCH: ${{ matrix.arch }}
       VSCODE_ARCH: ${{ matrix.npm_arch }}
@@ -79,13 +80,27 @@ jobs:
         with:
           submodules: true
 
-      - name: Require Node 24 from both version sources
+      - name: Resolve the managed release version
         run: |
           set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version=${GITHUB_REF_NAME#v}
+          else
+            version=4.141.0-kk.1
+          fi
+          case "$version" in
+            *-kk.*) ;;
+            *) echo "managed release version must use the -kk suffix: $version" >&2; exit 1 ;;
+          esac
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match v$version" >&2
+            exit 1
+          fi
           code_server=$(tr -d '[:space:]' < .node-version)
           vscode=$(tr -d '[:space:]' < lib/vscode/.nvmrc)
           case "$code_server" in 24.*) ;; *) echo "code-server Node is not 24: $code_server" >&2; exit 1 ;; esac
           case "$vscode" in 24.*) ;; *) echo "VS Code Node is not 24: $vscode" >&2; exit 1 ;; esac
+          echo "VERSION=$version" >> "$GITHUB_ENV"
           echo "CODE_SERVER_NODE=$code_server" >> "$GITHUB_ENV"
           echo "VSCODE_NODE=$vscode" >> "$GITHUB_ENV"
 
@@ -166,93 +181,79 @@ jobs:
           npm ci
           cd ../..
           npm ci
+          node --experimental-strip-types --test test/unit/managed-release.test.ts
+          cd lib/vscode
+          npm run gulp core-ci
+          npm run test-browser-no-install -- --grep "WorkspaceService - first configuration snapshot"
+          cd ..
           npm run build
           npm run build:vscode
           KEEP_MODULES=1 npm run release
           node --input-type=module -e '
             import { spawnSync } from "node:child_process";
             import fs from "node:fs";
-            const release = "release";
-            const binary = process.env.OS === "windows" ? `${release}/lib/node.exe` : `${release}/lib/node`;
+            import path from "node:path";
+            const root = process.cwd();
+            const release = path.resolve(root, "release");
+            const binary = path.resolve(release, "lib", process.env.OS === "windows" ? "node.exe" : "node");
             if (!fs.existsSync(binary)) throw new Error(`bundled Node is missing: ${binary}`);
             const version = spawnSync(binary, ["--version"], { encoding: "utf8" });
-            if (version.status !== 0 || !String(version.stdout).startsWith("v24.")) {
+            const bundledNode = String(version.stdout).trim();
+            if (version.status !== 0 || !bundledNode.startsWith("v24.")) {
               throw new Error(`bundled runtime is not Node 24: ${version.stdout || version.stderr}`);
             }
-            const nativeRoot = `${release}/node_modules`;
+            const target = `${process.platform}-${process.arch}`;
             const natives = [];
             const visit = (dir) => {
+              if (!fs.existsSync(dir)) return;
               for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-                const child = `${dir}/${entry.name}`;
-                if (entry.isDirectory()) visit(child);
-                else if (entry.name.endsWith(".node")) natives.push(child);
+                const child = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                  if (entry.name === "prebuilds") continue;
+                  visit(child);
+                } else if (entry.name.endsWith(".node")) {
+                  const parts = child.split(path.sep);
+                  const platform = parts.find((part) => /^(darwin|linux|win32|alpine)-/.test(part));
+                  if (platform && platform !== target) continue;
+                  natives.push(child);
+                }
               }
             };
-            visit(nativeRoot);
-            if (!natives.length) throw new Error("no native module was built");
+            for (const dir of [path.join(release, "node_modules"), path.join(release, "lib", "vscode", "node_modules"), path.join(release, "lib", "vscode", "extensions")]) visit(dir);
+            for (const name of ["pty.node", "spdlog.node"]) if (!natives.some((native) => native.endsWith(name))) throw new Error(`required native module ${name} is missing`);
+            const ripgrep = fs.readdirSync(path.join(release, "lib", "vscode", "node_modules", "@vscode", "ripgrep", "bin"), { recursive: true }).map(String);
+            if (!ripgrep.some((name) => /(^|[\\/])rg(\.exe)?$/.test(name))) throw new Error("bundled ripgrep is missing");
             for (const native of natives) {
-              const loaded = spawnSync(binary, ["--input-type=module", "-e", `import { createRequire } from "node:module"; createRequire(import.meta.url)(${JSON.stringify(native)});`], { encoding: "utf8" });
+              const loaded = spawnSync(binary, ["-e", `require(${JSON.stringify(native)})`], { encoding: "utf8" });
               if (loaded.status !== 0) throw new Error(`native module failed to load: ${native}\n${loaded.stderr}`);
             }
+            fs.writeFileSync(path.join(release, "source.json"), JSON.stringify({ bundledNode, os: process.env.OS, arch: process.env.ARCH, target }));
           '
           npm run package
 
       - name: Record source metadata
-        if: matrix.asset == 'linux-amd64'
         run: |
           set -euo pipefail
+          bundled=$(jq -r .bundledNode release/source.json)
           jq -n \
             --arg upstreamTag "v4.141.0" \
             --arg forkCommit "$(git rev-parse HEAD)" \
             --arg submoduleCommit "$(git -C lib/vscode rev-parse HEAD)" \
-            --arg nodeVersion "$CODE_SERVER_NODE" \
-            --arg vscodeNodeVersion "$VSCODE_NODE" \
+            --arg buildNode "$CODE_SERVER_NODE" \
+            --arg vscodeNode "$VSCODE_NODE" \
+            --arg bundledNode "$bundled" \
             --arg os "$OS" \
             --arg arch "$ARCH" \
-            '{upstreamTag:$upstreamTag, forkCommit:$forkCommit, submoduleCommit:$submoduleCommit, nodeVersion:$nodeVersion, vscodeNodeVersion:$vscodeNodeVersion, os:$os, arch:$arch}' \
-            > "release-packages/code-server-$VERSION-source.json"
+            '{upstreamTag:$upstreamTag, forkCommit:$forkCommit, submoduleCommit:$submoduleCommit, buildNode:$buildNode, vscodeNode:$vscodeNode, bundledNode:$bundledNode, os:$os, arch:$arch}' \
+            > "release-packages/code-server-$VERSION-$OS-$ARCH-source.json"
 
-      - name: Smoke the built server
-        if: matrix.os != 'windows'
+      - name: Smoke two workspaces in one server
+        if: matrix.asset == 'linux-amd64'
         run: |
           set -euo pipefail
-          port=$(node -e 'const s=require("net").createServer(); s.listen(0,"127.0.0.1",()=>{console.log(s.address().port); s.close()});')
-          first=$(mktemp -d)
-          second=$(mktemp -d)
-          password=$(openssl rand -hex 16)
-          start_server() {
-            local dir="$1"
-            release/bin/code-server \
-              --auth password \
-              --bind-addr "127.0.0.1:$port" \
-              --user-data-dir "$dir/user" \
-              --extensions-dir "$dir/extensions" \
-              "$dir/workspace" > "$dir/server.log" 2>&1 &
-            echo $! > "$dir/server.pid"
-            for _ in $(seq 1 60); do
-              if curl --silent --fail --max-time 2 "http://127.0.0.1:$port/healthz" >/dev/null; then
-                return 0
-              fi
-              sleep 1
-            done
-            cat "$dir/server.log" >&2
-            return 1
-          }
-          stop_server() {
-            local dir="$1"
-            if [[ -f "$dir/server.pid" ]]; then
-              kill "$(cat "$dir/server.pid")" || true
-              wait "$(cat "$dir/server.pid")" || true
-            fi
-          }
-          export PASSWORD="$password"
-          mkdir -p "$first/workspace" "$second/workspace"
-          start_server "$first"
-          curl --silent --fail --max-time 10 "http://127.0.0.1:$port/login" >/dev/null
-          stop_server "$first"
-          start_server "$second"
-          curl --silent --fail --max-time 10 "http://127.0.0.1:$port/login" >/dev/null
-          stop_server "$second"
+          npm --prefix test ci
+          ./test/node_modules/.bin/playwright install --with-deps chromium
+          CODE_SERVER_TEST_ENTRY="$PWD/release" npm run test:e2e -- e2e/managed-workspaces.test.ts
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -263,48 +264,62 @@ jobs:
   publish:
     name: Publish release
     needs: package
-    if: github.event_name == 'push' || inputs.publish
+    if: github.event_name == 'workflow_dispatch' && inputs.publish || github.ref_type == 'tag'
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          pattern: code-server-4.141.0-kk.1-*
+          pattern: code-server-*
           merge-multiple: true
           path: release-packages
       - name: Publish without replacing an existing release or asset
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: v4.141.0-kk.1
-          VERSION: 4.141.0-kk.1
         run: |
           set -euo pipefail
-          expected=(
-            "code-server-$VERSION-linux-amd64.tar.gz"
-            "code-server-$VERSION-linux-amd64.tar.gz.sha256"
-            "code-server-$VERSION-linux-arm64.tar.gz"
-            "code-server-$VERSION-linux-arm64.tar.gz.sha256"
-            "code-server-$VERSION-windows-amd64.tar.gz"
-            "code-server-$VERSION-windows-amd64.tar.gz.sha256"
-            "code-server-$VERSION-macos-amd64.tar.gz"
-            "code-server-$VERSION-macos-amd64.tar.gz.sha256"
-            "code-server-$VERSION-macos-arm64.tar.gz"
-            "code-server-$VERSION-macos-arm64.tar.gz.sha256"
-            "code-server-$VERSION-source.json"
-          )
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            tag=$GITHUB_REF_NAME
+          else
+            tag=v4.141.0-kk.1
+          fi
+          version=${tag#v}
+          repo=$GITHUB_REPOSITORY
+          expected=()
+          for target in linux-amd64 linux-arm64 windows-amd64 macos-amd64 macos-arm64; do
+            expected+=("code-server-$version-$target.tar.gz" "code-server-$version-$target.tar.gz.sha256" "code-server-$version-$target-source.json")
+          done
+          node --input-type=module -e '
+            import { createHash } from "node:crypto";
+            import fs from "node:fs";
+            for (const name of process.argv.slice(1)) {
+              if (!name.endsWith(".sha256")) continue;
+              const [checksum, file] = fs.readFileSync(`release-packages/${name}`, "utf8").trim().split(/\s+/);
+              const actual = createHash("sha256").update(fs.readFileSync(`release-packages/${file}`)).digest("hex");
+              if (checksum !== actual) throw new Error(`${file} checksum does not match`);
+            }
+          ' -- "${expected[@]}"
           for asset in "${expected[@]}"; do
             test -s "release-packages/$asset"
-            if [[ "$asset" == *.sha256 ]]; then
-              (cd release-packages && sha256sum --check "${asset##*/}")
-            fi
           done
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release $TAG already exists and will not be replaced" >&2
+          set +e
+          view=$(gh release view "$tag" --repo "$repo" 2>&1)
+          status=$?
+          set -e
+          if [[ $status -eq 0 ]]; then
+            echo "release $tag already exists and will not be replaced" >&2
             exit 1
           fi
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$TAG" \
+          if [[ "$view" != *"(HTTP 404)"* && "$view" != *"release not found"* ]]; then
+            echo "could not determine whether release $tag exists: $view" >&2
+            exit 1
+          fi
+          gh release create "$tag" \
+            --repo "$repo" \
+            --title "$tag" \
+            --draft \
             --verify-tag \
             release-packages/*
+          gh release edit "$tag" --repo "$repo" --draft=false

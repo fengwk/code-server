@@ -24,10 +24,7 @@ release_archive() {
     tar -czf "$archive" -s "/^$RELEASE_PATH/$release_name/" "$RELEASE_PATH"
   fi
 
-  (
-    cd release-packages
-    sha256sum "$release_name.tar.gz" > "$release_name.tar.gz.sha256"
-  )
+  node --input-type=module -e 'import { createHash } from "node:crypto"; import fs from "node:fs"; const file = process.argv[1]; fs.writeFileSync(`${file}.sha256`, `${createHash("sha256").update(fs.readFileSync(file)).digest("hex")}  ${file.split("/").pop()}\n`);' -- "$archive"
   echo "done (release-packages/$release_name)"
 }
 

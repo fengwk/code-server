@@ -79,14 +79,17 @@ Index: code-server/lib/vscode/src/vs/workbench/services/configuration/browser/co
  			});
  		}));
  
-@@ -563,6 +565,12 @@ export class WorkspaceService extends Di
+@@ -563,6 +565,15 @@ export class WorkspaceService extends Di
  			previousFolders = this.workspace.folders;
  			this.workspace.update(workspace);
  		} else {
-+			// It is possible for the configuration to become initialized in between
-+			// when the workspace was created and this function was called, so check
-+			// the configuration again now.
-+			if (!workspace.initialized && this.workspaceConfiguration.initialized) {
++			// The configuration can finish loading after the workspace snapshot
++			// was taken and before it is assigned. Refresh only a configuration-backed
++			// snapshot that is still marked uninitialized; single-folder and empty
++			// workspaces are already complete and have no workspace file to read.
++			if (!workspace.initialized && workspace.configuration && this.workspaceConfiguration.initialized) {
++				workspace.transient = this.workspaceConfiguration.isTransient();
++				workspace.folders = toWorkspaceFolders(this.workspaceConfiguration.getFolders(), workspace.configuration, this.uriIdentityService.extUri);
 +				workspace.initialized = true;
 +			}
  			this.workspace = workspace;
