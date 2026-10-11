@@ -1,7 +1,7 @@
 import * as fs from "fs/promises"
 import * as path from "path"
-import { test, expect } from "@playwright/test"
-import { describe } from "./baseFixture"
+import { describe, test, expect } from "./baseFixture"
+import { PASSWORD } from "../utils/constants"
 
 // One running server must open two distinct workspace files and persist an edit in each.
 describe("managed workspaces", ["--disable-workspace-trust", "--auth", "password"], {}, () => {
@@ -15,16 +15,19 @@ describe("managed workspaces", ["--disable-workspace-trust", "--auth", "password
     const second = path.join(root, "second.code-workspace")
     await fs.writeFile(first, JSON.stringify({ folders: [{ path: "first" }] }))
     await fs.writeFile(second, JSON.stringify({ folders: [{ path: "second" }] }))
+    await codeServerPage.page.fill(".password", PASSWORD)
+    await codeServerPage.page.click(".submit")
 
     const openWorkspace = async (file: string, folder: string, text: string) => {
-      await codeServerPage.navigate(`/?folder=${encodeURIComponent(file)}`)
-      await codeServerPage.login()
+      await codeServerPage.navigate(`/?workspace=${encodeURIComponent(file)}`)
       await expect(codeServerPage.page.locator(".monaco-workbench")).toBeVisible()
       await expect(codeServerPage.page.locator(`text=${folder}`).first()).toBeVisible()
       await codeServerPage.page.keyboard.press("Control+N")
       await codeServerPage.page.keyboard.type(text)
       await codeServerPage.page.keyboard.press("Control+S")
-      await codeServerPage.page.keyboard.type(path.join(folder, "saved.txt"))
+      const input = codeServerPage.page.locator(".quick-input-widget input")
+      await expect(input).toBeVisible()
+      await input.fill(path.join(root, folder, "saved.txt"))
       await codeServerPage.page.keyboard.press("Enter")
       await expect.poll(() => fs.readFile(path.join(root, folder, "saved.txt"), "utf8")).toBe(text)
     }

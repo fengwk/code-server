@@ -97,7 +97,24 @@ Index: code-server/lib/vscode/src/vs/workbench/services/configuration/test/brows
 ===================================================================
 --- code-server.orig/lib/vscode/src/vs/workbench/services/configuration/test/browser/configurationService.test.ts
 +++ code-server/lib/vscode/src/vs/workbench/services/configuration/test/browser/configurationService.test.ts
-@@ -1436,6 +1436,153 @@ suite('WorkspaceService - Initialization', () => {
+@@ -14,7 +14,7 @@ import { getGlobalConfigurationValue } from '../../../../../platform/agentHost/c
+ import { ConfigurationDefaultOverridesContribution, WorkspaceService } from '../../browser/configurationService.js';
+ import { ConfigurationEditingErrorCode } from '../../common/configurationEditing.js';
+ import { IFileService } from '../../../../../platform/files/common/files.js';
+-import { IWorkspaceContextService, WorkbenchState, IWorkspaceFoldersChangeEvent, ISingleFolderWorkspaceIdentifier, IWorkspaceIdentifier } from '../../../../../platform/workspace/common/workspace.js';
++import { IWorkspaceContextService, WorkbenchState, IWorkspaceFoldersChangeEvent, ISingleFolderWorkspaceIdentifier, IWorkspaceIdentifier, Workspace, toWorkspaceFolder } from '../../../../../platform/workspace/common/workspace.js';
+ import { ConfigurationTarget, IConfigurationService, IConfigurationChangeEvent } from '../../../../../platform/configuration/common/configuration.js';
+ import { workbenchInstantiationService, RemoteFileSystemProvider, TestEnvironmentService, TestTextFileService } from '../../../../test/browser/workbenchTestServices.js';
+ import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
+@@ -60,6 +60,7 @@ import { PolicyCategory } from '../../../../../base/common/policy.js';
+ import { ExperimentalSettingsService } from '../../common/experimentalSettings.js';
+ import { DisposableStore } from '../../../../../base/common/lifecycle.js';
+ import { CancellationError } from '../../../../../base/common/errors.js';
++import { WorkspaceConfiguration } from '../../browser/configuration.js';
+ 
+ suite('ConfigurationDefaultOverridesContribution', () => {
+ 
+@@ -1436,6 +1437,132 @@ suite('WorkspaceService - Initialization', () => {
  
  });
  
@@ -106,16 +123,20 @@ Index: code-server/lib/vscode/src/vs/workbench/services/configuration/test/brows
 +	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 +	const root = URI.file('snapshot-tests').with({ scheme: 'vscode-snapshot-tests' });
 +	let fileService: FileService;
-+	let configurationCache: GatedConfigurationCache;
++	let fileSystemProvider: InMemoryFileSystemProvider;
++	type AssignmentService = Pick<WorkspaceService, 'initialize' | 'getWorkspace'> & {
++		workspace: Workspace | undefined;
++		workspaceConfiguration: WorkspaceConfiguration;
++		updateWorkspaceAndInitializeConfiguration(workspace: Workspace, trigger: boolean): Promise<void>;
++	};
 +
 +	setup(() => {
-+		const fileSystemProvider = disposables.add(new InMemoryFileSystemProvider());
++		fileSystemProvider = disposables.add(new InMemoryFileSystemProvider());
 +		fileService = disposables.add(new FileService(new NullLogService()));
 +		disposables.add(fileService.registerProvider(root.scheme, fileSystemProvider));
-+		configurationCache = new GatedConfigurationCache();
 +	});
 +
-+	async function createService(options?: { holdConfiguration?: boolean }): Promise<WorkspaceService> {
++	function createService(): AssignmentService {
 +		const logService = new NullLogService();
 +		const instantiationService = workbenchInstantiationService(undefined, disposables);
 +		const environmentService = TestEnvironmentService;
@@ -123,17 +144,16 @@ Index: code-server/lib/vscode/src/vs/workbench/services/configuration/test/brows
 +		const uriIdentityService = disposables.add(new UriIdentityService(fileService));
 +		const userDataProfilesService = instantiationService.stub(IUserDataProfilesService, disposables.add(new UserDataProfilesService(environmentService, fileService, uriIdentityService, logService)));
 +		const userDataProfileService = instantiationService.stub(IUserDataProfileService, disposables.add(new UserDataProfileService(userDataProfilesService.defaultProfile)));
-+		if (options?.holdConfiguration) {
-+			configurationCache.holdUntilSnapshot = true;
-+		}
++		const configurationCache: IConfigurationCache = {
++			needsCaching: () => false,
++			read: async () => '',
++			write: async () => { },
++			remove: async () => { },
++		};
++		disposables.add(fileService.registerProvider(Schemas.vscodeUserData, disposables.add(new FileUserDataProvider(root.scheme, fileSystemProvider, Schemas.vscodeUserData, userDataProfilesService, uriIdentityService, logService))));
 +		const workspaceService = disposables.add(new WorkspaceService({ configurationCache }, environmentService, userDataProfileService, userDataProfilesService, fileService, remoteAgentService, uriIdentityService, logService, new NullPolicyService()));
-+		if (options?.holdConfiguration) {
-+			void configurationCache.held.then(() => {
-+				assert.strictEqual((workspaceService as unknown as { workspace?: { folders: unknown[] } }).workspace, undefined);
-+				configurationCache.releaseSnapshotHold();
-+			});
-+		}
-+		return workspaceService;
++		// Project private members only in tests; the assignment and folder lookup remain real.
++		return workspaceService as unknown as AssignmentService;
 +	}
 +
 +	async function writeWorkspace(name: string, content: string): Promise<IWorkspaceIdentifier> {
@@ -142,7 +162,7 @@ Index: code-server/lib/vscode/src/vs/workbench/services/configuration/test/brows
 +		return getWorkspaceIdentifier(configPath);
 +	}
 +
-+	function assertFolders(workspaceService: WorkspaceService, ...uris: URI[]): void {
++	function assertFolders(workspaceService: Pick<WorkspaceService, 'getWorkspace'>, ...uris: URI[]): void {
 +		const workspace = workspaceService.getWorkspace();
 +		assert.deepStrictEqual(workspace.folders.map(folder => folder.uri.toString()), uris.map(uri => uri.toString()));
 +		for (const uri of uris) {
@@ -154,8 +174,7 @@ Index: code-server/lib/vscode/src/vs/workbench/services/configuration/test/brows
 +		const folder = joinPath(root, 'early');
 +		await fileService.createFolder(folder);
 +		const identifier = await writeWorkspace('early.code-workspace', JSON.stringify({ folders: [{ path: 'early' }], transient: true }));
-+		configurationCache.seed(identifier.id, JSON.stringify({ content: JSON.stringify({ folders: [{ path: 'early' }], transient: true }) }));
-+		const workspaceService = await createService();
++		const workspaceService = createService();
 +		await workspaceService.initialize(identifier);
 +		assert.strictEqual((workspaceService.getWorkspace() as { initialized: boolean }).initialized, true);
 +		assert.strictEqual(workspaceService.getWorkspace().transient, true);
@@ -166,86 +185,63 @@ Index: code-server/lib/vscode/src/vs/workbench/services/configuration/test/brows
 +		const folder = joinPath(root, 'middle');
 +		await fileService.createFolder(folder);
 +		const identifier = await writeWorkspace('middle.code-workspace', JSON.stringify({ folders: [{ path: 'middle' }], transient: true }));
-+		configurationCache.seed(identifier.id, JSON.stringify({ content: JSON.stringify({ folders: [{ path: 'middle' }], transient: true }) }));
-+		const workspaceService = await createService({ holdConfiguration: true });
-+		await workspaceService.initialize(identifier);
-+		assert.strictEqual((workspaceService.getWorkspace() as { initialized: boolean }).initialized, true);
-+		assert.strictEqual(workspaceService.getWorkspace().transient, true);
++		const workspaceService = createService();
++		const snapshot = new Workspace(identifier.id, [], false, identifier.configPath);
++		snapshot.initialized = false;
++		await workspaceService.workspaceConfiguration.initialize(identifier, true);
++		assert.strictEqual(workspaceService.workspace, undefined);
++		assert.strictEqual(workspaceService.workspaceConfiguration.initialized, true);
++		const pending = workspaceService.updateWorkspaceAndInitializeConfiguration(snapshot, false);
++		// Assert before later configuration events can repair the stale assignment.
++		assert.strictEqual(workspaceService.workspace, snapshot);
++		assert.strictEqual(snapshot.initialized, true);
++		assert.strictEqual(snapshot.transient, true);
 +		assertFolders(workspaceService, folder);
++		await pending;
 +	});
 +
 +	test('configuration initialized after assignment is not invented by the snapshot', async () => {
 +		const folder = joinPath(root, 'late');
 +		await fileService.createFolder(folder);
 +		const identifier = await writeWorkspace('late.code-workspace', JSON.stringify({ folders: [{ path: 'late' }] }));
-+		configurationCache.seed(identifier.id, JSON.stringify({ content: JSON.stringify({ folders: [{ path: 'late' }] }) }));
-+		configurationCache.gate = 'closed';
-+		const workspaceService = await createService();
-+		const initializing = workspaceService.initialize(identifier);
-+		await configurationCache.entered;
-+		assert.strictEqual((workspaceService.getWorkspace() as { initialized: boolean }).initialized, false);
-+		assert.deepStrictEqual(workspaceService.getWorkspace().folders, []);
-+		configurationCache.open();
-+		await initializing;
-+		assert.strictEqual((workspaceService.getWorkspace() as { initialized: boolean }).initialized, true);
++		const workspaceService = createService();
++		const snapshot = new Workspace(identifier.id, [], false, identifier.configPath);
++		snapshot.initialized = false;
++		const pending = workspaceService.updateWorkspaceAndInitializeConfiguration(snapshot, false);
++		assert.strictEqual(snapshot.initialized, false);
++		assert.deepStrictEqual(snapshot.folders, []);
++		await pending;
++		await workspaceService.initialize(identifier);
 +		assertFolders(workspaceService, folder);
 +	});
 +
 +	test('an initialized empty configuration remains an empty workspace', async () => {
 +		const identifier = await writeWorkspace('empty.code-workspace', JSON.stringify({ folders: [] }));
-+		configurationCache.seed(identifier.id, JSON.stringify({ content: JSON.stringify({ folders: [] }) }));
-+		const workspaceService = await createService({ holdConfiguration: true });
-+		await workspaceService.initialize(identifier);
-+		assert.strictEqual((workspaceService.getWorkspace() as { initialized: boolean }).initialized, true);
++		const workspaceService = createService();
++		await workspaceService.workspaceConfiguration.initialize(identifier, true);
++		const snapshot = new Workspace(identifier.id, [], false, identifier.configPath);
++		snapshot.initialized = false;
++		const pending = workspaceService.updateWorkspaceAndInitializeConfiguration(snapshot, false);
++		assert.strictEqual(snapshot.initialized, true);
 +		assert.deepStrictEqual(workspaceService.getWorkspace().folders, []);
 +		assert.strictEqual(workspaceService.getWorkspace().getFolder(joinPath(root, 'empty', 'file.txt')), null);
++		await pending;
 +	});
 +
 +	test('a single-folder workspace does not read workspace configuration folders', async () => {
 +		const folder = joinPath(root, 'single');
 +		await fileService.createFolder(folder);
-+		let reads = 0;
-+		const originalRead = configurationCache.read.bind(configurationCache);
-+		configurationCache.read = async key => { reads++; return originalRead(key); };
-+		const workspaceService = await createService();
-+		await workspaceService.initialize(convertToWorkspacePayload(folder));
-+		assert.strictEqual(reads, 0);
-+		assert.strictEqual((workspaceService.getWorkspace() as { initialized: boolean }).initialized, true);
++		const identifier = await writeWorkspace('other.code-workspace', JSON.stringify({ folders: [] }));
++		const workspaceService = createService();
++		await workspaceService.workspaceConfiguration.initialize(identifier, true);
++		const snapshot = new Workspace('single', [toWorkspaceFolder(folder)], false, null);
++		snapshot.initialized = true;
++		const pending = workspaceService.updateWorkspaceAndInitializeConfiguration(snapshot, false);
++		assert.strictEqual(snapshot.initialized, true);
 +		assert.strictEqual(workspaceService.getWorkspace().configuration, null);
 +		assertFolders(workspaceService, folder);
++		await pending;
 +	});
-+
-+	class GatedConfigurationCache implements IConfigurationCache {
-+		gate: 'open' | 'closed' = 'open';
-+		holdUntilSnapshot = false;
-+		private readonly values = new Map<string, string>();
-+		private enteredResolve: (() => void) | undefined;
-+		private heldResolve: (() => void) | undefined;
-+		private releaseSnapshot: (() => void) | undefined;
-+		readonly entered = new Promise<void>(resolve => { this.enteredResolve = resolve; });
-+		readonly held = new Promise<void>(resolve => { this.heldResolve = resolve; });
-+		needsCaching(): boolean { return true; }
-+		seed(key: string, content: string): void { this.values.set(key, content); }
-+		open(): void { this.gate = 'open'; }
-+		releaseSnapshotHold(): void { this.releaseSnapshot?.(); }
-+		async read(key: { key: string }): Promise<string> {
-+			if (this.holdUntilSnapshot) {
-+				this.holdUntilSnapshot = false;
-+				this.heldResolve?.();
-+				await new Promise<void>(resolve => { this.releaseSnapshot = resolve; });
-+			}
-+			if (this.gate === 'closed') {
-+				this.enteredResolve?.();
-+				await new Promise<void>(resolve => {
-+					const original = this.open.bind(this);
-+					this.open = () => { this.gate = 'open'; resolve(); original(); };
-+				});
-+			}
-+			return this.values.get(key.key) ?? '';
-+		}
-+		async write(): Promise<void> { }
-+		async remove(): Promise<void> { }
-+	}
 +});
 +
  suite('WorkspaceConfigurationService - Folder', () => {

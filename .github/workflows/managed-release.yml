@@ -184,8 +184,13 @@ jobs:
           node --experimental-strip-types --test test/unit/managed-release.test.ts
           cd lib/vscode
           npm run gulp core-ci
-          npm run test-browser-no-install -- --grep "WorkspaceService - first configuration snapshot"
-          cd ..
+          if [[ "$OS" == linux ]]; then
+            ./node_modules/.bin/playwright install --with-deps chromium
+            npm run test-browser-no-install -- --build --browser chromium \
+              --run src/vs/workbench/services/configuration/test/browser/configurationService.test.ts \
+              --grep "WorkspaceService - first configuration snapshot"
+          fi
+          cd ../..
           npm run build
           npm run build:vscode
           KEEP_MODULES=1 npm run release
@@ -253,7 +258,7 @@ jobs:
           set -euo pipefail
           npm --prefix test ci
           ./test/node_modules/.bin/playwright install --with-deps chromium
-          CODE_SERVER_TEST_ENTRY="$PWD/release" npm run test:e2e -- e2e/managed-workspaces.test.ts
+          CODE_SERVER_TEST_ENTRY="$PWD/release" npm run test:e2e -- --project Chromium --retries 0 e2e/managed-workspaces.test.ts
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
