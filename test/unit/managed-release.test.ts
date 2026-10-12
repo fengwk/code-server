@@ -78,6 +78,15 @@ describe("managed release", () => {
 
   // Packaging is the upstream source release plus an archive. It must not grow
   // a second package format or silently omit checksums.
+  it("removes only the unused Unix deviceid target and verifies the storage entry point", () => {
+    assert.ok(workflow.includes('if (process.platform !== "win32")'))
+    assert.ok(workflow.includes('"@vscode", "deviceid", "build", "Release", "windows.node"'))
+    assert.ok(workflow.includes('requireServer("@vscode/deviceid").getDeviceId'))
+    assert.ok(workflow.includes('for (const native of natives)'))
+    assert.ok(workflow.includes('if (loaded.status !== 0) throw new Error'))
+  })
+
+  // The release archive and checksum remain the only distribution format.
   it("packages only the platform archive and checksum", () => {
     const script = fs.readFileSync(path.join(root, "ci/build/build-packages.sh"), "utf8")
     assert.ok(script.includes('local release_name="code-server-$VERSION-$OS-$ARCH"'))

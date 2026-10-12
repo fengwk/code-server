@@ -231,6 +231,11 @@ jobs:
               throw new Error(`bundled runtime is not Node 24: ${version.stdout || version.stderr}`);
             }
             const target = `${process.platform}-${process.arch}`;
+            // deviceid builds an inert Windows target on Unix; its storage entry
+            // point only loads this binding on Windows.
+            if (process.platform !== "win32") {
+              fs.rmSync(path.join(release, "lib", "vscode", "node_modules", "@vscode", "deviceid", "build", "Release", "windows.node"), { force: true });
+            }
             const natives = [];
             const visit = (dir) => {
               if (!fs.existsSync(dir)) return;
@@ -250,6 +255,7 @@ jobs:
             for (const dir of [path.join(release, "node_modules"), path.join(release, "lib", "vscode", "node_modules"), path.join(release, "lib", "vscode", "extensions")]) visit(dir);
             for (const name of ["pty.node", "spdlog.node"]) if (!natives.some((native) => native.endsWith(name))) throw new Error(`required native module ${name} is missing`);
             const requireServer = createRequire(path.join(release, "lib", "vscode", "package.json"));
+            if (typeof requireServer("@vscode/deviceid").getDeviceId !== "function") throw new Error("bundled deviceid storage cannot load");
             const { rgPath } = requireServer("@vscode/ripgrep-universal");
             const ripgrep = spawnSync(rgPath, ["--version"], { encoding: "utf8" });
             if (ripgrep.status !== 0 || !String(ripgrep.stdout).startsWith("ripgrep ")) {
