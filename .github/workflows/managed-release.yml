@@ -161,7 +161,8 @@ jobs:
           sdk=$(ls -d "/c/Program Files (x86)/Windows Kits/10/bin"/*/x64 | sort -V | tail -1)
           test -x "$sdk/signtool.exe"
           cygpath -w "$sdk" >> "$GITHUB_PATH"
-          cmd.exe /c "C:\msys64\usr\bin\pacman -Sy --noconfirm --needed rsync"
+          MSYS_NO_PATHCONV=1 cmd.exe /c "C:\msys64\usr\bin\pacman -Sy --noconfirm --needed rsync"
+          test -x /c/msys64/usr/bin/rsync.exe
           cat > "$RUNNER_TEMP/shim/rsync" <<'SHIM'
           #!/usr/bin/env bash
           exec /c/msys64/usr/bin/rsync.exe "$@"
@@ -196,8 +197,20 @@ jobs:
           if [[ "$OS" == linux ]]; then
             ./node_modules/.bin/playwright install --with-deps chromium
             npm run test-browser-no-install -- --build --browser chromium \
-              --run src/vs/workbench/services/configuration/test/browser/configurationService.test.ts \
-              --grep "WorkspaceService - first configuration snapshot"
+              --run out-build/vs/workbench/services/configuration/test/browser/configurationService.test.js \
+              --grep "WorkspaceService - first configuration snapshot" \
+              --reporter full-json-stream | tee "$RUNNER_TEMP/workspace-snapshot-tests.log"
+            node --input-type=module -e '
+              import assert from "node:assert/strict";
+              import fs from "node:fs";
+              const line = fs.readFileSync(process.argv[1], "utf8").split("\n").findLast(line => line.startsWith("[\"end\","));
+              assert.ok(line, "workspace snapshot test results are missing");
+              const [, stats] = JSON.parse(line);
+              assert.ok(stats.tests >= 5, "all workspace snapshot regression cases must run");
+              assert.equal(stats.passes, stats.tests);
+              assert.equal(stats.failures, 0);
+              assert.equal(stats.pending, 0);
+            ' "$RUNNER_TEMP/workspace-snapshot-tests.log"
           fi
           cd ../..
           npm run build
@@ -205,6 +218,7 @@ jobs:
           KEEP_MODULES=1 npm run release
           node --input-type=module -e '
             import { spawnSync } from "node:child_process";
+            import { createRequire } from "node:module";
             import fs from "node:fs";
             import path from "node:path";
             const root = process.cwd();
@@ -235,8 +249,12 @@ jobs:
             };
             for (const dir of [path.join(release, "node_modules"), path.join(release, "lib", "vscode", "node_modules"), path.join(release, "lib", "vscode", "extensions")]) visit(dir);
             for (const name of ["pty.node", "spdlog.node"]) if (!natives.some((native) => native.endsWith(name))) throw new Error(`required native module ${name} is missing`);
-            const ripgrep = fs.readdirSync(path.join(release, "lib", "vscode", "node_modules", "@vscode", "ripgrep", "bin"), { recursive: true }).map(String);
-            if (!ripgrep.some((name) => /(^|[\\/])rg(\.exe)?$/.test(name))) throw new Error("bundled ripgrep is missing");
+            const requireServer = createRequire(path.join(release, "lib", "vscode", "package.json"));
+            const { rgPath } = requireServer("@vscode/ripgrep-universal");
+            const ripgrep = spawnSync(rgPath, ["--version"], { encoding: "utf8" });
+            if (ripgrep.status !== 0 || !String(ripgrep.stdout).startsWith("ripgrep ")) {
+              throw new Error("bundled ripgrep cannot run on this host");
+            }
             for (const native of natives) {
               const loaded = spawnSync(binary, ["-e", `require(${JSON.stringify(native)})`], { encoding: "utf8" });
               if (loaded.status !== 0) throw new Error(`native module failed to load: ${native}\n${loaded.stderr}`);

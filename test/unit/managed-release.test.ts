@@ -55,6 +55,27 @@ describe("managed release", () => {
     assert.ok(workflow.includes("export VSCODE_REMOTE_CC=gcc VSCODE_REMOTE_CXX=g++"))
   })
 
+  // The browser runner resolves --run against the selected build output and
+  // can otherwise exit successfully without executing a single test.
+  it("runs the built workspace snapshot suite and rejects missing or skipped cases", () => {
+    assert.ok(workflow.includes("--run out-build/vs/workbench/services/configuration/test/browser/configurationService.test.js"))
+    assert.ok(workflow.includes("--reporter full-json-stream"))
+    assert.ok(workflow.includes("stats.tests >= 5"))
+    assert.ok(workflow.includes("assert.equal(stats.passes, stats.tests)"))
+    assert.ok(workflow.includes("assert.equal(stats.failures, 0)"))
+    assert.ok(workflow.includes("assert.equal(stats.pending, 0)"))
+  })
+
+  // Search uses the universal package API, not the build-only ripgrep layout.
+  // Windows setup must actually install rsync before the source build starts.
+  it("executes the bundled search binary and verifies the Windows copy tool", () => {
+    assert.ok(workflow.includes('requireServer("@vscode/ripgrep-universal")'))
+    assert.ok(workflow.includes('spawnSync(rgPath, ["--version"]'))
+    assert.doesNotMatch(workflow, /"@vscode", "ripgrep", "bin"/)
+    assert.ok(workflow.includes('MSYS_NO_PATHCONV=1 cmd.exe /c'))
+    assert.ok(workflow.includes("test -x /c/msys64/usr/bin/rsync.exe"))
+  })
+
   // Packaging is the upstream source release plus an archive. It must not grow
   // a second package format or silently omit checksums.
   it("packages only the platform archive and checksum", () => {
