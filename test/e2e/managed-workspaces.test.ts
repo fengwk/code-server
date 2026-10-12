@@ -30,7 +30,18 @@ describe("managed workspaces", ["--disable-workspace-trust", "--auth", "password
       await expect(input).toBeVisible()
       await input.fill(path.join(root, folder, "saved.txt"))
       await codeServerPage.page.keyboard.press("Enter")
-      await expect.poll(() => fs.readFile(path.join(root, folder, "saved.txt"), "utf8")).toBe(text)
+      await expect
+        .poll(async () => {
+          try {
+            return await fs.readFile(path.join(root, folder, "saved.txt"), "utf8")
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+              return undefined
+            }
+            throw error
+          }
+        })
+        .toBe(text)
     }
 
     await openWorkspace(first, "first", "first workspace")
