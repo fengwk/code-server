@@ -21,15 +21,21 @@ describe("managed workspaces", ["--disable-workspace-trust", "--auth", "password
     const openWorkspace = async (file: string, folder: string, text: string) => {
       await codeServerPage.navigate(`/?workspace=${encodeURIComponent(file)}`)
       await expect(codeServerPage.page.locator(".monaco-workbench")).toBeVisible()
-      await expect(codeServerPage.page.locator(`text=${folder}`).first()).toBeVisible()
+      await expect(codeServerPage.page.locator(".explorer-folders-view").getByText(folder, { exact: true })).toBeVisible()
       await codeServerPage.navigateMenus(["File", "New Text File"])
-      await expect(codeServerPage.page.locator(".monaco-editor.focused")).toBeVisible()
+      const editor = codeServerPage.page.locator(".part.editor .monaco-editor").first()
+      const editorInput = editor.getByRole("textbox").first()
+      await editorInput.focus()
+      await expect(editorInput).toBeFocused()
       await codeServerPage.page.keyboard.type(text)
-      await codeServerPage.navigateMenus(["File", "Save"])
-      const input = codeServerPage.page.locator(".quick-input-widget input")
+      await expect(editor.locator(".view-lines")).toContainText(text)
+      await editorInput.press(process.platform === "darwin" ? "Meta+s" : "Control+s")
+      const dialog = codeServerPage.page.locator(".quick-input-widget")
+      const input = dialog.locator("input")
       await expect(input).toBeVisible()
       await input.fill(path.join(root, folder, "saved.txt"))
-      await codeServerPage.page.keyboard.press("Enter")
+      await dialog.getByRole("button", { name: "OK", exact: true }).click()
+      await expect(input).toBeHidden()
       await expect
         .poll(async () => {
           try {
