@@ -139,8 +139,8 @@ Index: code-server/lib/vscode/src/vs/workbench/services/configuration/test/brows
 +
 +	function createService(): AssignmentService {
 +		const logService = new NullLogService();
-+		const instantiationService = workbenchInstantiationService(undefined, disposables);
-+		const environmentService = TestEnvironmentService;
++		const environmentService = Object.assign(new BrowserWorkbenchEnvironmentService('snapshot', root, { userDataPath: root.fsPath }, TestProductService), { args: [] });
++		const instantiationService = workbenchInstantiationService({ environmentService: () => environmentService }, disposables);
 +		const remoteAgentService = disposables.add(instantiationService.createInstance(RemoteAgentService));
 +		const uriIdentityService = disposables.add(new UriIdentityService(fileService));
 +		const userDataProfilesService = instantiationService.stub(IUserDataProfilesService, disposables.add(new UserDataProfilesService(environmentService, fileService, uriIdentityService, logService)));
