@@ -76,6 +76,16 @@ describe("managed release", () => {
     assert.ok(workflow.includes("test -x /c/msys64/usr/bin/rsync.exe"))
   })
 
+  // Every bundled addon is still loaded: CI supplies MSAL's GTK dependency, and
+  // Darwin builds Kerberos against its system libraries rather than Linux RTLD names.
+  it("supplies native verification dependencies without skipping addon loads", () => {
+    assert.match(workflow, /sudo apt-get install -y .*libwebkit2gtk-4\.1-0/)
+    assert.match(workflow, /name: Install macOS build dependencies\n        if: matrix\.os == 'macos'\n        run: \|/)
+    assert.ok(workflow.includes('echo "GYP_DEFINES=kerberos_use_rtld=false" >> "$GITHUB_ENV"'))
+    assert.ok(workflow.includes("for (const native of natives)"))
+    assert.ok(workflow.includes("if (loaded.status !== 0) throw new Error"))
+  })
+
   // Packaging is the upstream source release plus an archive. It must not grow
   // a second package format or silently omit checksums.
   it("removes only the unused Unix deviceid target and verifies the storage entry point", () => {
