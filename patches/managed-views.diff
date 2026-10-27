@@ -1,0 +1,1105 @@
+diff --git a/lib/vscode/src/vs/base/parts/ipc/common/ipc.ts b/lib/vscode/src/vs/base/parts/ipc/common/ipc.ts
+index be960b70..2c53e89d 100644
+--- a/lib/vscode/src/vs/base/parts/ipc/common/ipc.ts
++++ b/lib/vscode/src/vs/base/parts/ipc/common/ipc.ts
+@@ -844,7 +844,12 @@ export class IPCServer<TContext = string> implements IChannelServer<TContext>, I
+ 		return result;
+ 	}
+ 
+-	constructor(onDidClientConnect: Event<ClientConnectionEvent>, ipcLogger?: IIPCLogger | null, timeoutDelay?: number) {
++	constructor(
++		onDidClientConnect: Event<ClientConnectionEvent>,
++		ipcLogger?: IIPCLogger | null,
++		timeoutDelay?: number,
++		private readonly contextResolver?: (protocol: IMessagePassingProtocol) => Partial<TContext> | undefined,
++	) {
+ 		this.disposables.add(onDidClientConnect(({ protocol, onDidClientDisconnect }) => {
+ 			const onFirstMessage = Event.once(protocol.onMessage);
+ 
+@@ -852,7 +857,10 @@ export class IPCServer<TContext = string> implements IChannelServer<TContext>, I
+ 
+ 			const onFirstMessageDisposable = onFirstMessage(msg => {
+ 				const reader = new BufferReader(msg);
+-				const ctx = deserialize(reader) as TContext;
++				// The transport owner can replace identity fields that must not be
++				// trusted from the renderer. Undefined values deliberately clear
++				// renderer-supplied fields when there is no server-verified binding.
++				const ctx = Object.assign({}, deserialize(reader), this.contextResolver?.(protocol) ?? {}) as TContext;
+ 
+ 				const channelServer = new ChannelServer(protocol, ctx, ipcLogger, timeoutDelay);
+ 				const channelClient = new ChannelClient(protocol, ipcLogger);
+diff --git a/lib/vscode/src/vs/platform/remote/common/remoteAgentConnection.ts b/lib/vscode/src/vs/platform/remote/common/remoteAgentConnection.ts
+index af7d4c29..2714c8a0 100644
+--- a/lib/vscode/src/vs/platform/remote/common/remoteAgentConnection.ts
++++ b/lib/vscode/src/vs/platform/remote/common/remoteAgentConnection.ts
+@@ -754,6 +754,14 @@ export abstract class PersistentConnection extends Disposable {
+ 	protected abstract _reconnect(options: ISimpleConnectionOptions, timeoutCancellationToken: CancellationToken): Promise<void>;
+ }
+ 
++function readManagedViewContextFromLocation(): Pick<RemoteAgentConnectionContext, 'viewId' | 'bindingEpoch'> {
++	if (typeof window === 'undefined') {
++		return {};
++	}
++	const match = /^\/__kk\/ide\/view\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/([1-9][0-9]*)(?:\/|$)/.exec(window.location.pathname);
++	return match ? { viewId: match[1], bindingEpoch: match[2] } : {};
++}
++
+ export class ManagementPersistentConnection extends PersistentConnection {
+ 
+ 	public readonly client: Client<RemoteAgentConnectionContext>;
+@@ -762,7 +770,8 @@ export class ManagementPersistentConnection extends PersistentConnection {
+ 		super(ConnectionType.Management, options, reconnectionToken, protocol, /*reconnectionFailureIsFatal*/true);
+ 		this.client = this._register(new Client<RemoteAgentConnectionContext>(protocol, {
+ 			remoteAuthority: remoteAuthority,
+-			clientId: clientId
++			clientId: clientId,
++			...readManagedViewContextFromLocation()
+ 		}, options.ipcLogger));
+ 	}
+ 
+diff --git a/lib/vscode/src/vs/platform/remote/common/remoteAgentEnvironment.ts b/lib/vscode/src/vs/platform/remote/common/remoteAgentEnvironment.ts
+index e63de4e5..9a633ca0 100644
+--- a/lib/vscode/src/vs/platform/remote/common/remoteAgentEnvironment.ts
++++ b/lib/vscode/src/vs/platform/remote/common/remoteAgentEnvironment.ts
+@@ -37,4 +37,7 @@ export interface IRemoteAgentEnvironment {
+ export interface RemoteAgentConnectionContext {
+ 	remoteAuthority: string;
+ 	clientId: string;
++	/** Present only for a workbench served from a managed code-server view path. */
++	viewId?: string;
++	bindingEpoch?: string;
+ }
+diff --git a/lib/vscode/src/vs/server/node/extensionHostConnection.ts b/lib/vscode/src/vs/server/node/extensionHostConnection.ts
+index 06d614be..9650e477 100644
+--- a/lib/vscode/src/vs/server/node/extensionHostConnection.ts
++++ b/lib/vscode/src/vs/server/node/extensionHostConnection.ts
+@@ -22,6 +22,7 @@ import { getNLSConfiguration } from './remoteLanguagePacks.js';
+ import { IServerEnvironmentService } from './serverEnvironmentService.js';
+ import { IPCExtHostConnection, SocketExtHostConnection, writeExtHostConnection } from '../../workbench/services/extensions/common/extensionHostEnv.js';
+ import { IExtHostReadyMessage, IExtHostReduceGraceTimeMessage, IExtHostSocketMessage } from '../../workbench/services/extensions/common/extensionHostProtocol.js';
++import { ManagedViewContext, ManagedViewTracker } from './managedViews.js';
+ 
+ export async function buildUserEnvironment(startParamsEnv: { [key: string]: string | null } = {}, withUserShellEnvironment: boolean, language: string, environmentService: IServerEnvironmentService, logService: ILogService, configurationService: IConfigurationService): Promise<IProcessEnvironment> {
+ 	const nlsConfig = await getNLSConfiguration(language, environmentService.userDataPath);
+@@ -115,6 +116,12 @@ export class ExtensionHostConnection extends Disposable {
+ 	private _remoteAddress: string;
+ 	private _extensionHostProcess: cp.ChildProcess | null;
+ 	private _connectionData: ConnectionData | null;
++	private _managedViews: ManagedViewTracker | undefined;
++	private _managedView: ManagedViewContext | undefined;
++	private _managedTermination: Promise<void> | undefined;
++	private _managedExit: Promise<void> | undefined;
++	private _managedDetached = false;
++	private _managedPid: number | undefined;
+ 
+ 	constructor(
+ 		private readonly _reconnectionToken: string,
+@@ -127,6 +134,7 @@ export class ExtensionHostConnection extends Disposable {
+ 		@IConfigurationService private readonly _configurationService: IConfigurationService
+ 	) {
+ 		super();
++		this.id = _reconnectionToken;
+ 		this._canSendSocket = (!isWindows || !this._environmentService.args['socket-path']);
+ 		this._disposed = false;
+ 		this._remoteAddress = remoteAddress;
+@@ -139,6 +147,37 @@ export class ExtensionHostConnection extends Disposable {
+ 		this._log(`New connection established.`);
+ 	}
+ 
++	public readonly id: string;
++
++	public get pid(): number | undefined {
++		return this._managedPid;
++	}
++
++	public setManagedView(tracker: ManagedViewTracker, view: ManagedViewContext): void {
++		this._managedViews = tracker;
++		this._managedView = view;
++	}
++
++	public matchesManagedView(view: ManagedViewContext | undefined): boolean {
++		if (!this._managedView) {
++			return view === undefined;
++		}
++		return view !== undefined && view.viewId === this._managedView.viewId && view.bindingEpoch === this._managedView.bindingEpoch;
++	}
++
++	/** Terminate this extension host and resolve only after the child process exited. */
++	public terminate(): Promise<void> {
++		if (!this._managedTermination) {
++			this._managedTermination = (async () => {
++				this._cleanResources();
++				if (this._managedExit) {
++					await this._managedExit;
++				}
++			})();
++		}
++		return this._managedTermination;
++	}
++
+ 	override dispose(): void {
+ 		this._cleanResources();
+ 		super.dispose();
+@@ -237,13 +276,33 @@ export class ExtensionHostConnection extends Disposable {
+ 			this._connectionData.socket.end();
+ 			this._connectionData = null;
+ 		}
+-		if (this._extensionHostProcess) {
+-			this._extensionHostProcess.kill();
+-			this._extensionHostProcess = null;
++		const extensionHostProcess = this._extensionHostProcess;
++		this._extensionHostProcess = null;
++		if (extensionHostProcess) {
++			const alreadyExited = extensionHostProcess.exitCode !== null || extensionHostProcess.signalCode !== null;
++			this._managedExit = alreadyExited
++				? Promise.resolve()
++				: new Promise<void>((resolve) => extensionHostProcess.once('exit', () => resolve()));
++			if (!alreadyExited) {
++				extensionHostProcess.kill();
++			}
++			void this._managedExit.then(() => this._detachManagedView());
++		} else {
++			this._detachManagedView();
+ 		}
+ 		this._onClose.fire(undefined);
+ 	}
+ 
++	private _detachManagedView(): void {
++		if (this._managedDetached) {
++			return;
++		}
++		this._managedDetached = true;
++		if (this._managedViews && this._managedView) {
++			this._managedViews.detachExtensionHost(this._managedView.viewId, this._managedView.bindingEpoch, this);
++		}
++	}
++
+ 	public async start(startParams: IRemoteExtensionHostStartParams): Promise<void> {
+ 		try {
+ 			let execArgv: string[] = process.execArgv ? process.execArgv.filter(a => !/^--inspect(-brk)?=/.test(a)) : [];
+@@ -289,8 +348,17 @@ export class ExtensionHostConnection extends Disposable {
+ 			}
+ 			this._extensionHostProcess = cp.fork(FileAccess.asFileUri('bootstrap-fork').fsPath, args, opts);
+ 			const pid = this._extensionHostProcess.pid;
++			this._managedPid = pid;
+ 			this._log(`<${pid}> Launched Extension Host Process.`);
+ 
++			if (this._managedViews && this._managedView) {
++				if (!this._managedViews.attachExtensionHost(this._managedView.viewId, this._managedView.bindingEpoch, this)) {
++					this._log(`Managed view closed before the extension host could be registered; terminating it.`);
++					this._cleanResources();
++					return;
++				}
++			}
++
+ 			// Catch all output coming from the extension host process
+ 			this._extensionHostProcess.stdout!.setEncoding('utf8');
+ 			this._extensionHostProcess.stderr!.setEncoding('utf8');
+diff --git a/lib/vscode/src/vs/server/node/managedViews.ts b/lib/vscode/src/vs/server/node/managedViews.ts
+new file mode 100644
+index 00000000..8c468855
+--- /dev/null
++++ b/lib/vscode/src/vs/server/node/managedViews.ts
+@@ -0,0 +1,470 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { IPtyService } from '../../platform/terminal/common/terminal.js';
++import { ILogService } from '../../platform/log/common/log.js';
++
++/**
++ * Server-side ownership for managed code-server views.
++ *
++ * code-server owns the view registry and the HTTP/WebSocket routing. This
++ * tracker owns the resources that only the VS Code server can see: extension
++ * host processes, management connections and terminals in the shared PTY host.
++ * A close is only successful after every recorded handle reports actual exit.
++ */
++
++export type ManagedViewState = 'OPEN' | 'CLOSING' | 'CLEANUP_FAILED' | 'CLOSED';
++export type ManagedViewMode = 'normal' | 'discard' | 'expired';
++
++export interface ManagedViewContext {
++	viewId: string;
++	bindingEpoch: string;
++}
++
++export interface ManagedViewResourceFact {
++	id: string | number;
++	pid?: number;
++}
++
++export interface ManagedViewRuntimeInspection {
++	viewId: string;
++	bindingEpoch: string;
++	workspacePath: string;
++	state: ManagedViewState;
++	dirty: 'unknown';
++	draftBackup: { supported: false; reason: string };
++	managementConnections: ManagedViewResourceFact[];
++	extensionHosts: ManagedViewResourceFact[];
++	terminals: Array<{ id: number; pid?: number }>;
++	failures: string[];
++}
++
++export interface ManagedViewRuntimeRegistration {
++	viewId: string;
++	bindingEpoch: string;
++	workspacePath: string;
++	state: ManagedViewState;
++	created: boolean;
++}
++
++export interface ManagedViewRuntimeRebind {
++	state: 'OPEN' | 'CLEANUP_FAILED';
++	failures: string[];
++	releasedManagementConnections: number;
++	releasedExtensionHosts: number;
++	preservedTerminals: number;
++}
++
++export interface ManagedViewRuntimeClose {
++	state: 'CLOSED' | 'CLEANUP_FAILED';
++	failures: string[];
++	releasedManagementConnections: number;
++	releasedExtensionHosts: number;
++	releasedTerminals: number;
++}
++
++/** A disposable server resource with real exit evidence. */
++export interface ManagedExtensionHostHandle {
++	readonly id: string;
++	readonly pid?: number;
++	terminate(): Promise<void>;
++}
++
++export interface ManagedManagementHandle {
++	readonly id: string;
++	terminate(): Promise<void>;
++}
++
++interface TerminalHandle {
++	readonly id: number;
++	readonly pid?: number;
++	terminate(): Promise<void>;
++}
++
++interface ViewRecord {
++	viewId: string;
++	bindingEpoch: string;
++	workspacePath: string;
++	state: ManagedViewState;
++	management: Set<ManagedManagementHandle>;
++	extensionHosts: Set<ManagedExtensionHostHandle>;
++	terminals: Map<number, TerminalHandle>;
++	failures: string[];
++	closePromise?: Promise<ManagedViewRuntimeClose>;
++	lastClose?: ManagedViewRuntimeClose;
++}
++
++const CLEANUP_TIMEOUT_MS = 15_000;
++const DRAFT_BACKUP_REASON =
++	'code-server cannot observe renderer-only unsaved buffers; dirty is reported as unknown and close never claims the workspace is clean';
++
++function sameView(record: ViewRecord, viewId: string, bindingEpoch: string): boolean {
++	return record.viewId === viewId && record.bindingEpoch === bindingEpoch;
++}
++
++function timeoutError(): Error {
++	const error = new Error('managed resource did not report exit before the cleanup budget');
++	error.name = 'ManagedResourceExitTimeout';
++	return error;
++}
++
++function withTimeout(operation: Promise<void>, label: string): Promise<void> {
++	return new Promise<void>((resolve, reject) => {
++		const timer = setTimeout(() => reject(timeoutError()), CLEANUP_TIMEOUT_MS);
++		operation.then(
++			() => {
++				clearTimeout(timer);
++				resolve();
++			},
++			(error) => {
++				clearTimeout(timer);
++				reject(new Error(`${label}: ${error instanceof Error ? error.message : 'unknown error'}`));
++			}
++		);
++	});
++}
++
++export class ManagedViewTracker {
++	private readonly records = new Map<string, ViewRecord>();
++	private ptyService: IPtyService | undefined;
++
++	constructor(private readonly _logService: ILogService) { }
++
++	setPtyService(ptyService: IPtyService): void {
++		this.ptyService = ptyService;
++	}
++
++	accepts(viewId: string, bindingEpoch: string): boolean {
++		const record = this.records.get(viewId);
++		return !!record && record.bindingEpoch === bindingEpoch && record.state === 'OPEN';
++	}
++
++	async registerView(viewId: string, bindingEpoch: string, workspacePath: string): Promise<ManagedViewRuntimeRegistration> {
++		const existing = this.records.get(viewId);
++		if (existing && existing.state !== 'CLOSED') {
++			if (!sameView(existing, viewId, bindingEpoch) || existing.workspacePath !== workspacePath) {
++				throw new Error('view is already registered with a different identity');
++			}
++			return { viewId, bindingEpoch, workspacePath, state: existing.state, created: false };
++		}
++		if (existing) {
++			// A completed close releases the identity for a new binding epoch. The
++			// new record starts with no inherited handles.
++			this.records.delete(viewId);
++		}
++		this.records.set(viewId, {
++			viewId,
++			bindingEpoch,
++			workspacePath,
++			state: 'OPEN',
++			management: new Set(),
++			extensionHosts: new Set(),
++			terminals: new Map(),
++			failures: []
++		});
++		this._logService.info(`[ManagedView] registered ${viewId} epoch ${bindingEpoch}`);
++		return { viewId, bindingEpoch, workspacePath, state: 'OPEN', created: true };
++	}
++
++	async inspectView(viewId: string, bindingEpoch: string): Promise<ManagedViewRuntimeInspection> {
++		const record = this.records.get(viewId);
++		if (!record || record.bindingEpoch !== bindingEpoch) {
++			throw new Error('view is not registered');
++		}
++		return this.inspection(record);
++	}
++
++	async listViews(): Promise<ManagedViewRuntimeInspection[]> {
++		return Array.from(this.records.values())
++			.filter((record) => record.state !== 'CLOSED')
++			.map((record) => this.inspection(record));
++	}
++
++	attachManagementConnection(viewId: string, bindingEpoch: string, handle: ManagedManagementHandle): boolean {
++		const record = this.records.get(viewId);
++		if (!record || record.bindingEpoch !== bindingEpoch || record.state !== 'OPEN') {
++			return false;
++		}
++		record.management.add(handle);
++		return true;
++	}
++
++	detachManagementConnection(viewId: string, bindingEpoch: string, handle: ManagedManagementHandle): void {
++		const record = this.records.get(viewId);
++		if (record && record.bindingEpoch === bindingEpoch) {
++			record.management.delete(handle);
++		}
++	}
++
++	attachExtensionHost(viewId: string, bindingEpoch: string, handle: ManagedExtensionHostHandle): boolean {
++		const record = this.records.get(viewId);
++		if (!record || record.bindingEpoch !== bindingEpoch || record.state !== 'OPEN') {
++			return false;
++		}
++		record.extensionHosts.add(handle);
++		return true;
++	}
++
++	detachExtensionHost(viewId: string, bindingEpoch: string, handle: ManagedExtensionHostHandle): void {
++		const record = this.records.get(viewId);
++		if (record && record.bindingEpoch === bindingEpoch) {
++			record.extensionHosts.delete(handle);
++		}
++	}
++
++	attachTerminal(viewId: string, bindingEpoch: string, id: number): boolean {
++		const record = this.records.get(viewId);
++		const ptyService = this.ptyService;
++		if (!record || record.bindingEpoch !== bindingEpoch || record.state !== 'OPEN' || !ptyService) {
++			return false;
++		}
++		if (record.terminals.has(id)) {
++			return true;
++		}
++		const handle = this.createTerminalHandle(ptyService, id);
++		record.terminals.set(id, handle);
++		return true;
++	}
++
++	private createTerminalHandle(ptyService: IPtyService, id: number): TerminalHandle {
++		let pid: number | undefined;
++		let exited = false;
++		let resolveExit!: () => void;
++		const exit = new Promise<void>((resolve) => {
++			resolveExit = resolve;
++		});
++		const readyListener = ptyService.onProcessReady((event) => {
++			if (event.id === id) {
++				pid = event.event.pid;
++			}
++		});
++		// The ready event can fire before this ownership listener is attached.
++		void ptyService.listProcesses().then((processes) => {
++			if (pid === undefined) {
++				pid = processes.find((process) => process.id === id)?.pid;
++			}
++		}, () => {
++			// A missing process is still owned by its id and will be shut down by
++			// shutdown(); this lookup only enriches the reported facts.
++		});
++		const exitListener = ptyService.onProcessExit((event) => {
++			if (event.id !== id) {
++				return;
++			}
++			exited = true;
++			readyListener.dispose();
++			exitListener.dispose();
++			resolveExit();
++		});
++		return {
++			id,
++			get pid() {
++				return pid;
++			},
++			async terminate(): Promise<void> {
++				if (exited) {
++					return;
++				}
++				await ptyService.shutdown(id, true);
++				await exit;
++			}
++		};
++	}
++
++	async rebindView(viewId: string, fromBindingEpoch: string, bindingEpoch: string, workspacePath: string): Promise<ManagedViewRuntimeRebind> {
++		const record = this.records.get(viewId);
++		if (!record || record.bindingEpoch !== fromBindingEpoch || record.workspacePath !== workspacePath) {
++			throw new Error('view is not registered with this binding');
++		}
++		if (BigInt(bindingEpoch) <= BigInt(fromBindingEpoch)) {
++			throw new Error('rebind epoch must increase');
++		}
++		if (record.state !== 'OPEN') {
++			throw new Error(`view cannot rebind from state ${record.state}`);
++		}
++
++		// Freeze admissions before taking snapshots. Any in-flight resource still
++		// resolves against the old epoch and is either closed below or retained as
++		// a failure for an explicit retry.
++		record.state = 'CLOSING';
++		const management = [...record.management];
++		const extensionHosts = [...record.extensionHosts];
++		const failures: string[] = [];
++		let releasedManagementConnections = 0;
++		let releasedExtensionHosts = 0;
++
++		const outcomes = await Promise.allSettled([
++			...management.map((handle) => withTimeout(handle.terminate(), `management connection ${handle.id}`)),
++			...extensionHosts.map((handle) => withTimeout(handle.terminate(), `extension host ${handle.id}`))
++		]);
++		outcomes.forEach((outcome, index) => {
++			if (outcome.status === 'rejected') {
++				failures.push(outcome.reason instanceof Error ? outcome.reason.message : 'resource exit failed');
++				return;
++			}
++			if (index < management.length) {
++				releasedManagementConnections++;
++			} else {
++				releasedExtensionHosts++;
++			}
++		});
++
++		// Old asynchronous detach callbacks can only remove the exact handle they
++		// own. Remove the fulfilled snapshot here as well; the epoch check in the
++		// detach methods prevents a late callback from touching the new binding.
++		for (let i = 0; i < management.length; i++) {
++			if (outcomes[i].status === 'fulfilled') {
++				record.management.delete(management[i]);
++			}
++		}
++		for (let i = 0; i < extensionHosts.length; i++) {
++			if (outcomes[management.length + i].status === 'fulfilled') {
++				record.extensionHosts.delete(extensionHosts[i]);
++			}
++		}
++
++		if (failures.length > 0) {
++			record.state = 'CLEANUP_FAILED';
++			record.failures = failures;
++			this._logService.error(`[ManagedView] rebind failed ${viewId}: ${failures.join('; ')}`);
++			return {
++				state: 'CLEANUP_FAILED',
++				failures,
++				releasedManagementConnections,
++				releasedExtensionHosts,
++				preservedTerminals: record.terminals.size
++			};
++		}
++
++		// Terminals and their PTY host state are deliberately retained. Only the
++		// binding epoch changes; new management connections and extension hosts
++		// attach to this same record after the call returns.
++		record.bindingEpoch = bindingEpoch;
++		record.state = 'OPEN';
++		record.failures = [];
++		this._logService.info(`[ManagedView] rebound ${viewId} epoch ${fromBindingEpoch} -> ${bindingEpoch}`);
++		return {
++			state: 'OPEN',
++			failures: [],
++			releasedManagementConnections,
++			releasedExtensionHosts,
++			preservedTerminals: record.terminals.size
++		};
++	}
++
++	async closeView(viewId: string, bindingEpoch: string, _mode: ManagedViewMode): Promise<ManagedViewRuntimeClose> {
++		const record = this.records.get(viewId);
++		if (!record || record.bindingEpoch !== bindingEpoch) {
++			throw new Error('view is not registered');
++		}
++		if (record.state === 'CLOSED') {
++			return record.lastClose ?? {
++				state: 'CLOSED',
++				failures: [],
++				releasedManagementConnections: 0,
++				releasedExtensionHosts: 0,
++				releasedTerminals: 0
++			};
++		}
++		if (record.closePromise) {
++			return record.closePromise;
++		}
++
++		record.state = 'CLOSING';
++		record.closePromise = this.performClose(record).finally(() => {
++			record.closePromise = undefined;
++		});
++		return record.closePromise;
++	}
++
++	private async performClose(record: ViewRecord): Promise<ManagedViewRuntimeClose> {
++		const management = [...record.management];
++		const extensionHosts = [...record.extensionHosts];
++		const terminals = [...record.terminals.values()];
++		const failures: string[] = [];
++		let releasedManagementConnections = 0;
++		let releasedExtensionHosts = 0;
++		let releasedTerminals = 0;
++
++		const outcomes = await Promise.allSettled([
++			...management.map((handle) => withTimeout(handle.terminate(), `management connection ${handle.id}`)),
++			...extensionHosts.map((handle) => withTimeout(handle.terminate(), `extension host ${handle.id}`)),
++			...terminals.map((handle) => withTimeout(handle.terminate(), `terminal ${handle.id}`))
++		]);
++		outcomes.forEach((outcome, index) => {
++			if (outcome.status === 'rejected') {
++				failures.push(outcome.reason instanceof Error ? outcome.reason.message : 'resource exit failed');
++				return;
++			}
++			if (index < management.length) {
++				releasedManagementConnections++;
++			} else if (index < management.length + extensionHosts.length) {
++				releasedExtensionHosts++;
++			} else {
++				releasedTerminals++;
++			}
++		});
++
++		// Only handles that reported exit are removed. A failed close keeps the record and
++		// the remaining handles for an explicit retry.
++		for (let i = 0; i < management.length; i++) {
++			if (outcomes[i].status === 'fulfilled') {
++				record.management.delete(management[i]);
++			}
++		}
++		for (let i = 0; i < extensionHosts.length; i++) {
++			if (outcomes[management.length + i].status === 'fulfilled') {
++				record.extensionHosts.delete(extensionHosts[i]);
++			}
++		}
++		for (let i = 0; i < terminals.length; i++) {
++			if (outcomes[management.length + extensionHosts.length + i].status === 'fulfilled') {
++				record.terminals.delete(terminals[i].id);
++			}
++		}
++
++		const result: ManagedViewRuntimeClose = failures.length === 0
++			? {
++				state: 'CLOSED',
++				failures: [],
++				releasedManagementConnections,
++				releasedExtensionHosts,
++				releasedTerminals
++			}
++			: {
++				state: 'CLEANUP_FAILED',
++				failures,
++				releasedManagementConnections,
++				releasedExtensionHosts,
++				releasedTerminals
++			};
++		if (result.state === 'CLOSED') {
++			record.state = 'CLOSED';
++			record.failures = [];
++			record.lastClose = result;
++			this._logService.info(`[ManagedView] closed ${record.viewId} epoch ${record.bindingEpoch}`);
++		} else {
++			record.state = 'CLEANUP_FAILED';
++			record.failures = failures;
++			this._logService.error(`[ManagedView] close failed ${record.viewId}: ${failures.join('; ')}`);
++		}
++		return result;
++	}
++
++	private inspection(record: ViewRecord): ManagedViewRuntimeInspection {
++		return {
++			viewId: record.viewId,
++			bindingEpoch: record.bindingEpoch,
++			workspacePath: record.workspacePath,
++			state: record.state,
++			dirty: 'unknown',
++			draftBackup: { supported: false, reason: DRAFT_BACKUP_REASON },
++			managementConnections: Array.from(record.management, (handle) => ({ id: handle.id })),
++			extensionHosts: Array.from(record.extensionHosts, (handle) => ({ id: handle.id, pid: handle.pid })),
++			terminals: Array.from(record.terminals.values(), (handle) => ({ id: handle.id, pid: handle.pid })),
++			failures: [...record.failures]
++		};
++	}
++}
+diff --git a/lib/vscode/src/vs/server/node/remoteExtensionHostAgentServer.ts b/lib/vscode/src/vs/server/node/remoteExtensionHostAgentServer.ts
+index 72273fb3..6b8c748f 100644
+--- a/lib/vscode/src/vs/server/node/remoteExtensionHostAgentServer.ts
++++ b/lib/vscode/src/vs/server/node/remoteExtensionHostAgentServer.ts
+@@ -39,6 +39,7 @@ import { IServerEnvironmentService, ServerParsedArgs } from './serverEnvironment
+ import { IServerLifetimeService } from './serverLifetimeService.js';
+ import { getRemoteResourceResponseHeaders } from './remoteResourceResponse.js';
+ import { setupServerServices, SocketServer } from './serverServices.js';
++import { ManagedViewContext, ManagedViewTracker } from './managedViews.js';
+ import { CacheControl, serveError, serveFile, WebClientServer } from './webClientServer.js';
+ const require = createRequire(import.meta.url);
+ 
+@@ -73,6 +74,7 @@ class RemoteExtensionHostAgentServer extends Disposable implements IServerAPI {
+ 	private readonly _allReconnectionTokens: Set<string>;
+ 	private readonly _extHostLifetimeTokens = this._register(new DisposableMap<string>());
+ 	private readonly _webClientServer: WebClientServer | null;
++	private _managedViews!: ManagedViewTracker;
+ 	private readonly _webEndpointOriginChecker: WebEndpointOriginChecker;
+ 	private readonly _reconnectionGraceTime: number;
+ 
+@@ -112,6 +114,14 @@ class RemoteExtensionHostAgentServer extends Disposable implements IServerAPI {
+ 		this._reconnectionGraceTime = this._environmentService.reconnectionGraceTime;
+ 	}
+ 
++	public get managedViews(): ManagedViewTracker {
++		return this._managedViews;
++	}
++
++	public setManagedViews(managedViews: ManagedViewTracker): void {
++		this._managedViews = managedViews;
++	}
++
+ 	public async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+ 		// Only serve GET requests
+ 		if (req.method !== 'GET') {
+@@ -203,6 +213,12 @@ class RemoteExtensionHostAgentServer extends Disposable implements IServerAPI {
+ 		let isReconnection = false;
+ 		let skipWebSocketFrames = false;
+ 
++		const managedView = readManagedViewContext(req);
++		if (managedView === 'invalid' || (managedView !== undefined && !this._managedViews.accepts(managedView.viewId, managedView.bindingEpoch))) {
++			socket.end('HTTP/1.1 410 Gone\r\nConnection: close\r\n\r\n');
++			return;
++		}
++
+ 		if (req.url) {
+ 			const parsedUrl = parseRequestUrl(req.url);
+ 			if (!parsedUrl) {
+@@ -233,7 +249,7 @@ class RemoteExtensionHostAgentServer extends Disposable implements IServerAPI {
+ 			return;
+ 		}
+ 
+-		this._handleWebSocketConnection(upgraded, isReconnection, reconnectionToken);
++		this._handleWebSocketConnection(upgraded, isReconnection, reconnectionToken, managedView);
+ 	}
+ 
+ 	public handleServerError(err: Error): void {
+@@ -271,7 +287,7 @@ class RemoteExtensionHostAgentServer extends Disposable implements IServerAPI {
+ 	 * The problem is that await introduces a process.nextTick due to the implicit Promise.then
+ 	 * This can lead to some bytes being received and interpreted and a control message being emitted before the next listener has a chance to be registered.
+ 	 */
+-	private _handleWebSocketConnection(socket: NodeSocket | WebSocketNodeSocket, isReconnection: boolean, reconnectionToken: string): void {
++	private _handleWebSocketConnection(socket: NodeSocket | WebSocketNodeSocket, isReconnection: boolean, reconnectionToken: string, managedView: ManagedViewContext | undefined): void {
+ 		const remoteAddress = this._getRemoteAddress(socket);
+ 		const logPrefix = `[${remoteAddress}][${reconnectionToken.substr(0, 8)}]`;
+ 		const protocol = new PersistentProtocol({ socket });
+@@ -392,12 +408,12 @@ class RemoteExtensionHostAgentServer extends Disposable implements IServerAPI {
+ 
+ 				state = State.Done;
+ 				listener.dispose();
+-				this._handleConnectionType(remoteAddress, logPrefix, protocol, socket, isReconnection, reconnectionToken, msg2);
++				this._handleConnectionType(remoteAddress, logPrefix, protocol, socket, isReconnection, reconnectionToken, msg2, managedView);
+ 			}
+ 		});
+ 	}
+ 
+-	private async _handleConnectionType(remoteAddress: string, _logPrefix: string, protocol: PersistentProtocol, socket: NodeSocket | WebSocketNodeSocket, isReconnection: boolean, reconnectionToken: string, msg: ConnectionTypeRequest): Promise<void> {
++	private async _handleConnectionType(remoteAddress: string, _logPrefix: string, protocol: PersistentProtocol, socket: NodeSocket | WebSocketNodeSocket, isReconnection: boolean, reconnectionToken: string, msg: ConnectionTypeRequest, managedView: ManagedViewContext | undefined): Promise<void> {
+ 		const logPrefix = (
+ 			msg.desiredConnectionType === ConnectionType.Management
+ 				? `${_logPrefix}[ManagementConnection]`
+@@ -424,6 +440,9 @@ class RemoteExtensionHostAgentServer extends Disposable implements IServerAPI {
+ 					}
+ 				}
+ 
++				if (!this._managementConnections[reconnectionToken].matchesManagedView(managedView)) {
++					return this._rejectWebSocketConnection(logPrefix, protocol, `Managed view binding mismatch`);
++				}
+ 				protocol.sendControl(VSBuffer.fromString(JSON.stringify({ type: 'ok' })));
+ 				const dataChunk = protocol.readEntireBuffer();
+ 				protocol.dispose();
+@@ -438,11 +457,23 @@ class RemoteExtensionHostAgentServer extends Disposable implements IServerAPI {
+ 
+ 				protocol.sendControl(VSBuffer.fromString(JSON.stringify({ type: 'ok' })));
+ 				const con = new ManagementConnection(this._logService, reconnectionToken, remoteAddress, protocol, this._reconnectionGraceTime);
+-				this._socketServer.acceptConnection(con.protocol, con.onClose);
++				if (managedView) {
++					con.setManagedView(managedView);
++				}
++				if (managedView && !this._managedViews.attachManagementConnection(managedView.viewId, managedView.bindingEpoch, con)) {
++					con.dispose();
++					return;
++				}
++				this._socketServer.acceptConnection(con.protocol, con.onClose, managedView
++					? { viewId: managedView.viewId, bindingEpoch: managedView.bindingEpoch }
++					: { viewId: undefined, bindingEpoch: undefined });
+ 				this._managementConnections[reconnectionToken] = con;
+ 				this._allReconnectionTokens.add(reconnectionToken);
+ 				con.onClose(() => {
+ 					delete this._managementConnections[reconnectionToken];
++					if (managedView) {
++						this._managedViews.detachManagementConnection(managedView.viewId, managedView.bindingEpoch, con);
++					}
+ 				});
+ 
+ 			}
+@@ -471,6 +502,9 @@ class RemoteExtensionHostAgentServer extends Disposable implements IServerAPI {
+ 					}
+ 				}
+ 
++				if (!this._extHostConnections[reconnectionToken].matchesManagedView(managedView)) {
++					return this._rejectWebSocketConnection(logPrefix, protocol, `Managed view binding mismatch`);
++				}
+ 				protocol.sendPause();
+ 				protocol.sendControl(VSBuffer.fromString(JSON.stringify(startParams.port ? { debugPort: startParams.port } : {})));
+ 				const dataChunk = protocol.readEntireBuffer();
+@@ -489,6 +523,9 @@ class RemoteExtensionHostAgentServer extends Disposable implements IServerAPI {
+ 				const dataChunk = protocol.readEntireBuffer();
+ 				protocol.dispose();
+ 				const con = this._instantiationService.createInstance(ExtensionHostConnection, reconnectionToken, remoteAddress, socket, dataChunk);
++				if (managedView) {
++					con.setManagedView(this._managedViews, managedView);
++				}
+ 				this._extHostConnections[reconnectionToken] = con;
+ 				this._allReconnectionTokens.add(reconnectionToken);
+ 				this._extHostLifetimeTokens.set(reconnectionToken, this._serverLifetimeService.active(`ExtensionHost:${reconnectionToken.substring(0, 8)}`));
+@@ -590,6 +627,24 @@ class RemoteExtensionHostAgentServer extends Disposable implements IServerAPI {
+ 	}
+ }
+ 
++/**
++ * Read the identity code-server attaches only after its own view router has
++ * verified the OPEN binding. Browser-supplied values are stripped by code-server.
++ */
++function readManagedViewContext(req: http.IncomingMessage): ManagedViewContext | undefined | 'invalid' {
++	const rawId = req.headers['x-kk-view-id'];
++	const rawEpoch = req.headers['x-kk-binding-epoch'];
++	const viewId = Array.isArray(rawId) ? rawId[0] : rawId;
++	const bindingEpoch = Array.isArray(rawEpoch) ? rawEpoch[0] : rawEpoch;
++	if (viewId === undefined && bindingEpoch === undefined) {
++		return undefined;
++	}
++	if (typeof viewId !== 'string' || typeof bindingEpoch !== 'string') {
++		return 'invalid';
++	}
++	return { viewId, bindingEpoch };
++}
++
+ export interface IServerAPI {
+ 	/**
+ 	 * Do not remove!!. Called from server-main.js
+@@ -607,6 +662,10 @@ export interface IServerAPI {
+ 	 * Do not remove!!. Called from server-main.js
+ 	 */
+ 	dispose(): void;
++	/**
++	 * Local managed-view contract consumed by code-server's loopback management API.
++	 */
++	readonly managedViews: ManagedViewTracker;
+ }
+ 
+ export async function createServer(address: string | net.AddressInfo | null, args: ServerParsedArgs, REMOTE_DATA_FOLDER: string, agentHostBridgeConnectionToken: string | undefined): Promise<IServerAPI> {
+@@ -650,7 +709,7 @@ export async function createServer(address: string | net.AddressInfo | null, arg
+ 	});
+ 
+ 	const disposables = new DisposableStore();
+-	const { socketServer, instantiationService } = await setupServerServices(connectionToken, args, REMOTE_DATA_FOLDER, agentHostBridgeConnectionToken, disposables);
++	const { socketServer, instantiationService, managedViews } = await setupServerServices(connectionToken, args, REMOTE_DATA_FOLDER, agentHostBridgeConnectionToken, disposables);
+ 
+ 	// Set the unexpected error handler after the services have been initialized, to avoid having
+ 	// the telemetry service overwrite our handler
+@@ -734,6 +793,7 @@ export async function createServer(address: string | net.AddressInfo | null, arg
+ 	}
+ 
+ 	const remoteExtensionHostAgentServer = instantiationService.createInstance(RemoteExtensionHostAgentServer, socketServer, connectionToken, vsdaMod, hasWebClient, serverBasePath);
++	remoteExtensionHostAgentServer.setManagedViews(managedViews);
+ 
+ 	perf.mark('code/server/ready');
+ 	const currentTime = performance.now();
+diff --git a/lib/vscode/src/vs/server/node/remoteExtensionManagement.ts b/lib/vscode/src/vs/server/node/remoteExtensionManagement.ts
+index 4a38e83e..8b79d7ad 100644
+--- a/lib/vscode/src/vs/server/node/remoteExtensionManagement.ts
++++ b/lib/vscode/src/vs/server/node/remoteExtensionManagement.ts
+@@ -9,6 +9,7 @@ import { Emitter, Event } from '../../base/common/event.js';
+ import { VSBuffer } from '../../base/common/buffer.js';
+ import { ProcessTimeRunOnceScheduler } from '../../base/common/async.js';
+ import { IDisposable } from '../../base/common/lifecycle.js';
++import { ManagedViewContext } from './managedViews.js';
+ 
+ function printTime(ms: number): string {
+ 	let h = 0;
+@@ -35,8 +36,13 @@ function printTime(ms: number): string {
+ 
+ export class ManagementConnection {
+ 
++	public readonly id: string;
++	private _managedView: ManagedViewContext | undefined;
++
+ 	private _onClose = new Emitter<void>();
+ 	public readonly onClose: Event<void> = this._onClose.event;
++	private readonly _closePromise: Promise<void>;
++	private _resolveClose!: () => void;
+ 
+ 	private readonly _reconnectionGraceTime: number;
+ 	private readonly _reconnectionShortGraceTime: number;
+@@ -55,6 +61,10 @@ export class ManagementConnection {
+ 		protocol: PersistentProtocol,
+ 		reconnectionGraceTime: number
+ 	) {
++		this.id = _reconnectionToken;
++		this._closePromise = new Promise<void>((resolve) => {
++			this._resolveClose = resolve;
++		});
+ 		this._reconnectionGraceTime = reconnectionGraceTime;
+ 		const defaultShortGrace = ProtocolConstants.ReconnectionShortGraceTime;
+ 		this._reconnectionShortGraceTime = reconnectionGraceTime > 0 ? Math.min(defaultShortGrace, reconnectionGraceTime) : 0;
+@@ -115,6 +125,28 @@ export class ManagementConnection {
+ 		socket.end();
+ 		this._onClose.fire(undefined);
+ 		this._onClose.dispose();
++		this._resolveClose();
++	}
++
++	/** Dispose this connection and wait for the close event, not merely the socket close call. */
++	public terminate(): Promise<void> {
++		this._cleanResources();
++		return this._closePromise;
++	}
++
++	public dispose(): void {
++		this._cleanResources();
++	}
++
++	public setManagedView(view: ManagedViewContext): void {
++		this._managedView = view;
++	}
++
++	public matchesManagedView(view: ManagedViewContext | undefined): boolean {
++		if (!this._managedView) {
++			return view === undefined;
++		}
++		return view !== undefined && view.viewId === this._managedView.viewId && view.bindingEpoch === this._managedView.bindingEpoch;
+ 	}
+ 
+ 	public acceptReconnection(remoteAddress: string, socket: ISocket, initialDataChunk: VSBuffer): void {
+diff --git a/lib/vscode/src/vs/server/node/remoteTerminalChannel.ts b/lib/vscode/src/vs/server/node/remoteTerminalChannel.ts
+index f2bbe6a4..11ac3515 100644
+--- a/lib/vscode/src/vs/server/node/remoteTerminalChannel.ts
++++ b/lib/vscode/src/vs/server/node/remoteTerminalChannel.ts
+@@ -27,6 +27,7 @@ import { ICreateTerminalProcessArguments, ICreateTerminalProcessResult, IWorkspa
+ import * as terminalEnvironment from '../../workbench/contrib/terminal/common/terminalEnvironment.js';
+ import { AbstractVariableResolverService } from '../../workbench/services/configurationResolver/common/variableResolver.js';
+ import { buildUserEnvironment } from './extensionHostConnection.js';
++import { ManagedViewContext, ManagedViewTracker } from './managedViews.js';
+ import { IServerEnvironmentService } from './serverEnvironmentService.js';
+ import { IProductService } from '../../platform/product/common/productService.js';
+ import { IExtensionManagementService } from '../../platform/extensionManagement/common/extensionManagement.js';
+@@ -105,7 +106,8 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
+ 		private readonly _ptyHostService: IPtyHostService,
+ 		private readonly _productService: IProductService,
+ 		private readonly _extensionManagementService: IExtensionManagementService,
+-		private readonly _configurationService: IConfigurationService
++		private readonly _configurationService: IConfigurationService,
++		private readonly _managedViews: ManagedViewTracker
+ 	) {
+ 		super();
+ 	}
+@@ -117,7 +119,7 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
+ 
+ 			case RemoteTerminalChannelRequest.CreateProcess: {
+ 				const uriTransformer = createURITransformer(ctx.remoteAuthority);
+-				return this._createProcess(uriTransformer, <ICreateTerminalProcessArguments>args);
++				return this._createProcess(ctx, uriTransformer, <ICreateTerminalProcessArguments>args);
+ 			}
+ 			case RemoteTerminalChannelRequest.AttachToProcess: return this._ptyHostService.attachToProcess.apply(this._ptyHostService, args);
+ 			case RemoteTerminalChannelRequest.DetachFromProcess: return this._ptyHostService.detachFromProcess.apply(this._ptyHostService, args);
+@@ -151,7 +153,13 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
+ 			case RemoteTerminalChannelRequest.SetTerminalLayoutInfo: return this._ptyHostService.setTerminalLayoutInfo(<ISetTerminalLayoutInfoArgs>args);
+ 			case RemoteTerminalChannelRequest.SerializeTerminalState: return this._ptyHostService.serializeTerminalState.apply(this._ptyHostService, args);
+ 			case RemoteTerminalChannelRequest.ReviveTerminalProcesses: return this._ptyHostService.reviveTerminalProcesses.apply(this._ptyHostService, args);
+-			case RemoteTerminalChannelRequest.GetRevivedPtyNewId: return this._ptyHostService.getRevivedPtyNewId.apply(this._ptyHostService, args);
++			case RemoteTerminalChannelRequest.GetRevivedPtyNewId: {
++				const revivedId = await this._ptyHostService.getRevivedPtyNewId(args[0], args[1]);
++				if (typeof revivedId === 'number') {
++					this._trackTerminal(ctx, revivedId);
++				}
++				return revivedId;
++			}
+ 			case RemoteTerminalChannelRequest.SetUnicodeVersion: return this._ptyHostService.setUnicodeVersion.apply(this._ptyHostService, args);
+ 			case RemoteTerminalChannelRequest.SetNextCommandId: return this._ptyHostService.setNextCommandId.apply(this._ptyHostService, args);
+ 			case RemoteTerminalChannelRequest.ReduceConnectionGraceTime: return this._reduceConnectionGraceTime();
+@@ -190,7 +198,29 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
+ 		throw new Error(`IPC Command ${event} not found`);
+ 	}
+ 
+-	private async _createProcess(uriTransformer: IURITransformer, args: ICreateTerminalProcessArguments): Promise<ICreateTerminalProcessResult> {
++	private _managedView(ctx: RemoteAgentConnectionContext): ManagedViewContext | undefined {
++		const viewId = (ctx as RemoteAgentConnectionContext & { viewId?: unknown }).viewId;
++		const bindingEpoch = (ctx as RemoteAgentConnectionContext & { bindingEpoch?: unknown }).bindingEpoch;
++		if (typeof viewId !== 'string' || typeof bindingEpoch !== 'string') {
++			return undefined;
++		}
++		return { viewId, bindingEpoch };
++	}
++
++	private _trackTerminal(ctx: RemoteAgentConnectionContext, id: number): void {
++		const view = this._managedView(ctx);
++		if (!view) {
++			return;
++		}
++		if (!this._managedViews.attachTerminal(view.viewId, view.bindingEpoch, id)) {
++			// The view entered CLOSING between create and ownership registration. Never leave
++			// an untracked shell behind.
++			void this._ptyHostService.shutdown(id, true);
++			throw new Error('managed view is closing; terminal was not accepted');
++		}
++	}
++
++	private async _createProcess(ctx: RemoteAgentConnectionContext, uriTransformer: IURITransformer, args: ICreateTerminalProcessArguments): Promise<ICreateTerminalProcessResult> {
+ 		const shellLaunchConfig: IShellLaunchConfig = {
+ 			name: args.shellLaunchConfig.name,
+ 			executable: args.shellLaunchConfig.executable,
+@@ -268,6 +298,7 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
+ 		env.VSCODE_IPC_HOOK_CLI = ipcHandlePath;
+ 
+ 		const persistentProcessId = await this._ptyHostService.createProcess(shellLaunchConfig, initialCwd, args.cols, args.rows, args.unicodeVersion, env, baseEnv, args.options, args.shouldPersistTerminal, args.workspaceId, args.workspaceName);
++		this._trackTerminal(ctx, persistentProcessId);
+ 		const commandsExecuter: ICommandsExecuter = {
+ 			executeCommand: <T>(id: string, ...args: unknown[]): Promise<T> => this._executeCommand(persistentProcessId, id, args, uriTransformer)
+ 		};
+diff --git a/lib/vscode/src/vs/server/node/serverServices.ts b/lib/vscode/src/vs/server/node/serverServices.ts
+index b5930d53..fd1f63a8 100644
+--- a/lib/vscode/src/vs/server/node/serverServices.ts
++++ b/lib/vscode/src/vs/server/node/serverServices.ts
+@@ -111,6 +111,7 @@ import type { ILifecycleMainService } from '../../platform/lifecycle/electron-ma
+ import type { IUserDataProfilesMainService } from '../../platform/userDataProfile/electron-main/userDataProfile.js';
+ import { SANDBOX_HELPER_CHANNEL_NAME, SandboxHelperChannel } from '../../platform/sandbox/common/sandboxHelperIpc.js';
+ import { SandboxHelperService } from '../../platform/sandbox/node/sandboxHelper.js';
++import { ManagedViewTracker } from './managedViews.js';
+ 
+ const eventPrefix = 'monacoworkbench';
+ 
+@@ -133,6 +134,7 @@ export async function setupServerServices(connectionToken: ServerConnectionToken
+ 	const logService = disposables.add(new LogService(logger, [new ServerLogger(getLogLevel(environmentService))]));
+ 	services.set(ILogService, logService);
+ 	setTimeout(() => cleanupOlderLogs(environmentService.logsHome.with({ scheme: Schemas.file }).fsPath).then(null, err => logService.error(err)), 10000);
++	const managedViews = new ManagedViewTracker(logService);
+ 	disposables.add(logService.onDidChangeLogLevel(logLevel => log(logService, logLevel, `Log level changed to ${LogLevelToString(logService.getLevel())}`)));
+ 
+ 	logService.trace(`Remote configuration data at ${REMOTE_DATA_FOLDER}`);
+@@ -269,6 +271,7 @@ export async function setupServerServices(connectionToken: ServerConnectionToken
+ 	);
+ 	const ptyHostService = instantiationService.createInstance(PtyHostService, ptyHostStarter);
+ 	services.set(IPtyService, ptyHostService);
++	managedViews.setPtyService(ptyHostService);
+ 
+ 	const serverLifetimeService = instantiationService.createInstance(ServerLifetimeService, {
+ 		enableAutoShutdown: !!args['enable-remote-auto-shutdown'],
+@@ -419,7 +422,7 @@ export async function setupServerServices(connectionToken: ServerConnectionToken
+ 
+ 		socketServer.registerChannel(SANDBOX_HELPER_CHANNEL_NAME, new SandboxHelperChannel(new SandboxHelperService()));
+ 
+-		socketServer.registerChannel(REMOTE_TERMINAL_CHANNEL_NAME, new RemoteTerminalChannel(environmentService, logService, ptyHostService, productService, extensionManagementService, configurationService));
++		socketServer.registerChannel(REMOTE_TERMINAL_CHANNEL_NAME, new RemoteTerminalChannel(environmentService, logService, ptyHostService, productService, extensionManagementService, configurationService, managedViews));
+ 
+ 		const remoteExtensionsScanner = new RemoteExtensionsScannerService(instantiationService.createInstance(ExtensionManagementCLI, productService.extensionsForceVersionByQuality ?? [], logService), environmentService, userDataProfilesService, extensionsScannerService, logService, extensionGalleryService, languagePackService, extensionManagementService);
+ 		socketServer.registerChannel(RemoteExtensionsScannerChannelName, new RemoteExtensionsScannerChannel(remoteExtensionsScanner, (ctx: RemoteAgentConnectionContext) => getUriTransformer(ctx.remoteAuthority)));
+@@ -451,7 +454,7 @@ export async function setupServerServices(connectionToken: ServerConnectionToken
+ 		};
+ 	});
+ 
+-	return { socketServer, instantiationService };
++	return { socketServer, instantiationService, managedViews };
+ }
+ 
+ const _uriTransformerCache: { [remoteAuthority: string]: IURITransformer } = Object.create(null);
+@@ -466,14 +469,22 @@ function getUriTransformer(remoteAuthority: string): IURITransformer {
+ export class SocketServer<TContext = string> extends IPCServer<TContext> {
+ 
+ 	private _onDidConnectEmitter: Emitter<ClientConnectionEvent>;
++	private readonly _connectionContexts = new WeakMap<IMessagePassingProtocol, Partial<TContext>>();
+ 
+ 	constructor() {
+ 		const emitter = new Emitter<ClientConnectionEvent>();
+-		super(emitter.event);
++		super(emitter.event, undefined, undefined, (protocol) => {
++			const context = this._connectionContexts.get(protocol);
++			this._connectionContexts.delete(protocol);
++			return context;
++		});
+ 		this._onDidConnectEmitter = emitter;
+ 	}
+ 
+-	public acceptConnection(protocol: IMessagePassingProtocol, onDidClientDisconnect: Event<void>): void {
++	public acceptConnection(protocol: IMessagePassingProtocol, onDidClientDisconnect: Event<void>, context?: Partial<TContext>): void {
++		if (context) {
++			this._connectionContexts.set(protocol, context);
++		}
+ 		this._onDidConnectEmitter.fire({ protocol, onDidClientDisconnect });
+ 	}
+ }
+diff --git a/lib/vscode/src/vs/server/node/webClientServer.ts b/lib/vscode/src/vs/server/node/webClientServer.ts
+index a0391a1b..783954b7 100644
+--- a/lib/vscode/src/vs/server/node/webClientServer.ts
++++ b/lib/vscode/src/vs/server/node/webClientServer.ts
+@@ -307,9 +307,13 @@ export class WebClientServer {
+ 			return Array.isArray(val) ? val[0] : val;
+ 		};
+ 
+-		// Prefix routes with basePath for clients
+-		const rootBase = relativeRoot(getOriginalUrl(req))
+-		const vscodeBase = relativePath(getOriginalUrl(req))
++		// Prefix routes with basePath for clients. code-server's managed-view
++		// router has already verified the view binding and strips the view prefix
++		// from the request; relative URLs keep every emitted resource under the
++		// current view path without trusting Referer.
++		const managedView = getFirstHeader('x-kk-managed-view') === '1';
++		const rootBase = managedView ? '.' : relativeRoot(getOriginalUrl(req))
++		const vscodeBase = managedView ? '.' : relativePath(getOriginalUrl(req))
+ 		const forwardedPrefix = getFirstHeader('x-forwarded-prefix');
+ 		const basePath = vscodeBase || (forwardedPrefix && isSafeBasePath(forwardedPrefix) ? forwardedPrefix : this._basePath);
+ 

@@ -12,6 +12,7 @@ import { isDevMode, vsRootPath } from "../constants"
 import { authenticated, ensureAuthenticated, ensureOrigin, redirect, replaceTemplates, self } from "../http"
 import { SocketProxyProvider } from "../socket"
 import { isFile } from "../util"
+import type { ManagedViewRuntime } from "../managedViews"
 import { type WebsocketRequest, Router as WsRouter } from "../wsRouter"
 
 export const router = express.Router()
@@ -29,6 +30,12 @@ export interface IVSCodeServerAPI {
   handleUpgrade(req: http.IncomingMessage, socket: net.Socket): void
   handleServerError(err: Error): void
   dispose(): void
+  /**
+   * Present when this code-server build includes the managed-view patch.
+   * Management routes fail explicitly rather than pretending to own resources
+   * when this is undefined.
+   */
+  managedViews?: ManagedViewRuntime
 }
 
 /**
@@ -171,7 +178,8 @@ router.get("/", ensureVSCodeLoaded, async (req, res, next) => {
   next()
 })
 
-router.get("/manifest.json", async (req, res) => {
+export const manifestHandler = async (req: express.Request, res: express.Response): Promise<void> => {
+  const managedView = req.headers["x-kk-managed-view"] === "1"
   res.writeHead(200, { "Content-Type": "application/manifest+json" })
 
   res.end(
@@ -205,12 +213,15 @@ router.get("/manifest.json", async (req, res) => {
         null,
         2,
       ),
+      managedView ? { base: ".", csStaticBase: "./_static" } : undefined,
     ),
   )
-})
+}
+
+router.get("/manifest.json", manifestHandler)
 
 let mintKeyPromise: Promise<Buffer> | undefined
-router.post("/mint-key", ensureAuthenticated, async (req, res) => {
+export const mintKeyHandler = async (req: express.Request, res: express.Response): Promise<void> => {
   if (!mintKeyPromise) {
     mintKeyPromise = new Promise(async (resolve) => {
       const keyPath = path.join(req.args["user-data-dir"], "serve-web-key-half")
@@ -235,7 +246,11 @@ router.post("/mint-key", ensureAuthenticated, async (req, res) => {
   }
   const key = await mintKeyPromise
   res.end(key)
-})
+}
+
+router.post("/mint-key", ensureAuthenticated, mintKeyHandler)
+
+export const getVSCodeServer = (): IVSCodeServerAPI | undefined => vscodeServer
 
 router.all(/.*/, ensureAuthenticated, ensureVSCodeLoaded, async (req, res) => {
   vscodeServer!.handleRequest(req, res)

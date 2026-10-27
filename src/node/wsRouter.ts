@@ -38,7 +38,11 @@ export type WebSocketHandler = (
 ) => void | Promise<void>
 
 export class WebsocketRouter {
-  public readonly router = express.Router()
+  public readonly router: express.Router
+
+  constructor(options?: express.RouterOptions) {
+    this.router = express.Router(options)
+  }
 
   /**
    * Handle a websocket at this route. Note that websockets are immediately
@@ -61,8 +65,8 @@ export class WebsocketRouter {
   }
 }
 
-export function Router(): WebsocketRouter {
-  return new WebsocketRouter()
+export function Router(options?: express.RouterOptions): WebsocketRouter {
+  return new WebsocketRouter(options)
 }
 
 export const wss = new Websocket.Server({ noServer: true })

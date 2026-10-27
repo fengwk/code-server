@@ -50,6 +50,21 @@ export class CodeServer {
   }
 
   /**
+   * The root code-server process ID. This is used by resource-ownership tests
+   * to observe the real process tree rather than trusting registry entries.
+   */
+  async pid(): Promise<number> {
+    if (!this.process) {
+      this.process = this.spawn()
+    }
+    const { process } = await this.process
+    if (process.pid === undefined) {
+      throw new Error("code-server exited before providing a process ID")
+    }
+    return process.pid
+  }
+
+  /**
    * The address at which code-server can be accessed. Spawns code-server if it
    * has not yet been spawned.
    */

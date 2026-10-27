@@ -9,19 +9,22 @@ import { getCookieSessionName, HttpCode, HttpError } from "../../common/http"
 import { plural } from "../../common/util"
 import { App } from "../app"
 import { AuthType, DefaultedArgs } from "../cli"
-import { commit, rootPath } from "../constants"
+import { rootPath } from "../constants"
 import { Heart } from "../heart"
 import { redirect } from "../http"
 import { CoderSettings, SettingsProvider } from "../settings"
 import { UpdateProvider } from "../update"
 import { getMediaMime, paths } from "../util"
+import { ManagedViewManager, MANAGED_VIEW_PATH } from "../managedViews"
 import type { WebsocketRequest } from "../wsRouter"
 import * as domainProxy from "./domainProxy"
 import { errorHandler, wsErrorHandler } from "./errors"
 import * as health from "./health"
 import * as login from "./login"
+import * as managedViews from "./managedViews"
 import * as logout from "./logout"
 import * as pathProxy from "./pathProxy"
+import { createStaticHandler } from "./static"
 import * as update from "./update"
 import * as vscode from "./vscode"
 
@@ -60,6 +63,9 @@ export const register = async (
 
   const settings = new SettingsProvider<CoderSettings>(path.join(args["user-data-dir"], "coder.json"))
   const updater = new UpdateProvider("https://api.github.com/repos/coder/code-server/releases/latest", settings)
+  const managedViewManager = new ManagedViewManager()
+  const managedViewRouters = managedViews.createViewRouters(managedViewManager)
+  const managementRouter = managedViews.createManagementRouter(managedViewManager)
 
   const cookieSessionName = getCookieSessionName(args["cookie-suffix"])
 
@@ -84,6 +90,18 @@ export const register = async (
 
   app.router.use(common)
   app.wsRouter.use(common)
+
+  // Managed-view identity is produced only by code-server's own router. Never
+  // forward values supplied by a browser to the embedded VS Code server.
+  const stripManagedViewHeaders: express.RequestHandler = (req, _res, next) => {
+    delete req.headers["x-kk-managed-view"]
+    delete req.headers["x-kk-view-id"]
+    delete req.headers["x-kk-binding-epoch"]
+    delete req.headers["x-kk-managed-view-base"]
+    next()
+  }
+  app.router.use(stripManagedViewHeaders)
+  app.wsRouter.use(stripManagedViewHeaders)
 
   app.router.use(/.*/, async (req, res, next) => {
     // If we're handling TLS ensure all requests are redirected to HTTPS.
@@ -110,6 +128,13 @@ export const register = async (
   app.router.use("/", domainProxy.router)
   app.wsRouter.use("/", domainProxy.wsRouter.router)
 
+  // Local management API and view-scoped browser traffic. Management uses its
+  // own loopback token guard and JSON parser; view routes use the normal
+  // code-server session auth plus the OPEN view binding.
+  app.router.use(`${MANAGED_VIEW_PATH}/:viewId/:bindingEpoch`, managedViewRouters.router)
+  app.wsRouter.use(`${MANAGED_VIEW_PATH}/:viewId/:bindingEpoch`, managedViewRouters.wsRouter)
+  app.router.use("/__kk/ide", managementRouter)
+
   app.router.all("/proxy/:port{/*path}", async (req, res) => {
     await pathProxy.proxy(req, res)
   })
@@ -135,21 +160,7 @@ export const register = async (
   app.router.use(express.json())
   app.router.use(express.urlencoded({ extended: true }))
 
-  app.router.use(
-    "/_static",
-    express.static(rootPath, {
-      cacheControl: commit !== "development",
-      fallthrough: false,
-      setHeaders: (res, path, stat) => {
-        // The service worker is served from a sub-path on the static route so
-        // this is required to allow it to register a higher scope (by default
-        // the browser only allows it to register from its own path or lower).
-        if (path.endsWith("/serviceWorker.js")) {
-          res.setHeader("Service-Worker-Allowed", "/")
-        }
-      },
-    }),
-  )
+  app.router.use("/_static", createStaticHandler())
 
   app.router.use("/healthz", health.router)
   app.wsRouter.use("/healthz", health.wsRouter.router)
@@ -182,6 +193,8 @@ export const register = async (
   return {
     disposeRoutes: () => {
       heart.dispose()
+      managedViewManager.dispose()
+      managedViewRouters.dispose()
       vscode.dispose()
     },
     heart,
