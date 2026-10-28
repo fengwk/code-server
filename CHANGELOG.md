@@ -57,6 +57,38 @@ Code v1.141.0
 
 ## Unreleased
 
+## [4.143.1](https://github.com/coder/code-server/releases/tag/v4.143.1) - 2026-10-23
+
+Code v1.143.1
+
+### Changed
+
+- Update to Code 1.143.1
+
+## [4.141.1](https://github.com/coder/code-server/releases/tag/v4.141.1) - 2026-10-23
+
+### Security
+
+- Update bundled Node.js to 24.22.1 to fix a remote code execution bug in the
+  Brotli decoder (CVE-2026-111497).
+- Reject compressed request bodies (`Content-Encoding: br`, `gzip`, or
+  `deflate`) instead of decompressing them.
+
+### Fixed
+
+- Boolean flags in the `--flag=false` form and in the config file now respect
+  being set to false.
+
+### Added
+
+- Turkish locale.
+
+### Changed
+
+- Expand values from path options in the config file that start with a tilde.
+
+## [4.141.0](https://github.com/coder/code-server/releases/tag/v4.141.0) - 2026-10-08
+
 Code v1.141.0
 
 ### Added

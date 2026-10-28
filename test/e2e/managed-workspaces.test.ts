@@ -1,7 +1,7 @@
 import * as fs from "fs/promises"
 import * as path from "path"
-import { describe, test, expect } from "./baseFixture"
 import { PASSWORD } from "../utils/constants"
+import { describe, test, expect } from "./baseFixture"
 
 // One running server must open two distinct workspace files and persist an edit in each.
 describe("managed workspaces", ["--disable-workspace-trust", "--auth", "password"], {}, () => {
@@ -21,7 +21,9 @@ describe("managed workspaces", ["--disable-workspace-trust", "--auth", "password
     const openWorkspace = async (file: string, folder: string, text: string) => {
       await codeServerPage.navigate(`/?workspace=${encodeURIComponent(file)}`)
       await expect(codeServerPage.page.locator(".monaco-workbench")).toBeVisible()
-      await expect(codeServerPage.page.locator(".explorer-folders-view").getByText(folder, { exact: true })).toBeVisible()
+      await expect(
+        codeServerPage.page.locator(".explorer-folders-view").getByText(folder, { exact: true }),
+      ).toBeVisible()
       await codeServerPage.navigateMenus(["File", "New Text File"])
       const editor = codeServerPage.page.locator(".part.editor .monaco-editor").first()
       const editorInput = editor.getByRole("textbox").first()
@@ -33,7 +35,46 @@ describe("managed workspaces", ["--disable-workspace-trust", "--auth", "password
       const dialog = codeServerPage.page.locator(".quick-input-widget")
       const input = dialog.locator("input")
       await expect(input).toBeVisible()
-      await input.fill(path.join(root, folder, "saved.txt"))
+      await expect(dialog.locator(".quick-input-title")).toHaveText("Save As")
+
+      // SimpleFileDialog shows the dialog before updateItems() finishes. Its
+      // initialization then force-writes the suggested path, so typing before
+      // that completes is overwritten. The suggested valueSelection is applied
+      // only after updateItems() resolves and just before busy is cleared
+      // (simpleFileDialog.ts pickResource()), making this full semantic state
+      // the observable ready condition for accepting the user's path.
+      const expectedSuggestion = path.join(root, folder, text)
+      const suggestionName = path.basename(expectedSuggestion)
+      const readSaveInput = () =>
+        input.evaluate((element) => {
+          const field = element as HTMLInputElement
+          return {
+            value: field.value,
+            selectionStart: field.selectionStart,
+            selectionEnd: field.selectionEnd,
+          }
+        })
+      await expect
+        .poll(async () => {
+          const state = await readSaveInput()
+          return {
+            folder: path.dirname(state.value),
+            value: state.value,
+            selection: [state.selectionStart, state.selectionEnd],
+          }
+        })
+        .toEqual({
+          folder: path.join(root, folder),
+          value: expectedSuggestion,
+          selection: [
+            expectedSuggestion.length - suggestionName.length,
+            expectedSuggestion.length - path.extname(suggestionName).length,
+          ],
+        })
+
+      const target = path.join(root, folder, "saved.txt")
+      await input.fill(target)
+      await expect(input).toHaveValue(target)
       await dialog.getByRole("button", { name: "OK", exact: true }).click()
       await expect(input).toBeHidden()
       await expect

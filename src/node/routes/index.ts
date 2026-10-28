@@ -12,17 +12,17 @@ import { AuthType, DefaultedArgs } from "../cli"
 import { rootPath } from "../constants"
 import { Heart } from "../heart"
 import { redirect } from "../http"
+import { ManagedViewManager, MANAGED_VIEW_PATH } from "../managedViews"
 import { CoderSettings, SettingsProvider } from "../settings"
 import { UpdateProvider } from "../update"
 import { getMediaMime, paths } from "../util"
-import { ManagedViewManager, MANAGED_VIEW_PATH } from "../managedViews"
 import type { WebsocketRequest } from "../wsRouter"
 import * as domainProxy from "./domainProxy"
 import { errorHandler, wsErrorHandler } from "./errors"
 import * as health from "./health"
 import * as login from "./login"
-import * as managedViews from "./managedViews"
 import * as logout from "./logout"
+import * as managedViews from "./managedViews"
 import * as pathProxy from "./pathProxy"
 import { createStaticHandler } from "./static"
 import * as update from "./update"
@@ -157,8 +157,10 @@ export const register = async (
     })
   })
 
-  app.router.use(express.json())
-  app.router.use(express.urlencoded({ extended: true }))
+  // Reject compressed request bodies so unauthenticated requests cannot reach
+  // the zlib/Brotli decoders. Browsers never compress request bodies.
+  app.router.use(express.json({ inflate: false }))
+  app.router.use(express.urlencoded({ extended: true, inflate: false }))
 
   app.router.use("/_static", createStaticHandler())
 

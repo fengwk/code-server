@@ -3,7 +3,7 @@ import * as crypto from "crypto"
 import { promises as fs } from "fs"
 import { load } from "js-yaml"
 import * as path from "path"
-import { generateCertificate, generatePassword, paths, splitOnFirstEquals } from "./util"
+import { expandTilde, generateCertificate, generatePassword, paths, splitOnFirstEquals } from "./util"
 import { EditorSessionManagerClient } from "./vscodeSocket"
 
 export enum Feature {
@@ -436,7 +436,11 @@ export const parse = (
 
       const option = options[key]
       if (option.type === "boolean") {
-        ;(args[key] as boolean) = true
+        // Booleans set to false (for example `--flag=false`, which is also how
+        // false values from the config file are passed in) are ignored.
+        if (value !== "false") {
+          ;(args[key] as boolean) = true
+        }
         continue
       }
 
@@ -462,7 +466,7 @@ export const parse = (
       }
 
       if (option.path) {
-        value = path.resolve(value)
+        value = path.resolve(expandTilde(value))
       }
 
       switch (option.type) {

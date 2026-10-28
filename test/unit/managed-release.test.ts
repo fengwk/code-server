@@ -22,11 +22,11 @@ describe("managed release", () => {
 
   // The candidate version is fixed in one place: dispatch and tag publishes
   // must agree, and the source metadata keeps the upstream Code tag separate.
-  it("targets the 4.141.0-kk.2 candidate consistently", () => {
-    assert.equal(workflow.match(/4\.141\.0-kk\.2/g)?.length, 2)
-    assert.doesNotMatch(workflow, /4\.141\.0-kk\.1/)
-    assert.ok(workflow.includes('--arg upstreamTag "v4.141.0"'))
-    assert.ok(workflow.includes("tag=v4.141.0-kk.2"))
+  it("targets the 4.143.1-kk.1 candidate consistently", () => {
+    assert.equal(workflow.match(/4\.143\.1-kk\.1/g)?.length, 2)
+    assert.doesNotMatch(workflow, /4\.141\.0-kk\.2/)
+    assert.ok(workflow.includes('--arg upstreamTag "v4.143.1"'))
+    assert.ok(workflow.includes("tag=v4.143.1-kk.1"))
   })
 
   // A managed-view patch that misses a VS Code file leaves the built server
@@ -222,7 +222,7 @@ describe("node version contract", () => {
   it("uses the same Node 24 declared by code-server and VS Code", () => {
     const codeServer = fs.readFileSync(path.join(root, ".node-version"), "utf8").trim()
     const vscode = fs.readFileSync(path.join(root, "lib/vscode/.nvmrc"), "utf8").trim()
-    assert.equal(codeServer, "24.21.0")
+    assert.equal(codeServer, "24.22.1")
     assert.equal(vscode, "24.18.0")
     assert.equal(codeServer.startsWith("24."), true)
     assert.equal(vscode.startsWith("24."), true)
