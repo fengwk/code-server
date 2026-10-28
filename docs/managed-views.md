@@ -1,6 +1,6 @@
 # Managed views
 
-This fork (`4.141.0-kk.2`, Code `1.141.0`) exposes isolated code-server views to
+This fork (`4.143.1-kk.1`, Code `1.143.1`) exposes isolated code-server views to
 the KK Studio daemon. A view is a browser workbench bound to one workspace,
 binding epoch, extension host, terminal set and management connection.
 
@@ -94,16 +94,20 @@ messages.
 
 ## Build and verification
 
+With the VS Code submodule checked out and patches applied as described in the
+[development workflow](CONTRIBUTING.md#development-workflow):
+
 ```bash
 # Node 24 is required by .node-version and lib/vscode/.nvmrc.
 nvm use
 npm ci
+export VERSION=4.143.1-kk.1
 npm run build
-VERSION=4.141.0-kk.2 npm run build:vscode
+npm run build:vscode
 KEEP_MODULES=1 npm run release
 npm --prefix test ci
 CODE_SERVER_TEST_ENTRY="$PWD/release" npm run test:e2e -- \
-  --project Chromium --retries 0 e2e/managed-views.test.ts
+  --project Chromium --retries 0 e2e/managed-workspaces.test.ts e2e/managed-views.test.ts
 ```
 
 The embedded tracker and the extension-host and terminal races are covered by the
@@ -111,17 +115,17 @@ VS Code node test:
 
 ```bash
 cd lib/vscode
-node build/next/index.ts transpile --out out-build
+npm run gulp core-ci
 node test/unit/node/index.js --build \
-  --run out-build/vs/server/test/node/managedViews.test.ts
+  --run out-build/vs/server/test/node/managedViews.test.ts --timeout 30000
 ```
 
-The focused real-browser test opens two workspaces in one server, creates a
-terminal in each, rebinds one view to a higher epoch, verifies the old extension
-host exited while its terminal stayed alive, verifies the other view is
-unaffected, and closes both with PID exit evidence. It also checks normal-close
-dirty rejection, the service-worker scope, and a close-during-terminal-start
-race.
+The focused real-browser tests save edits in two workspace files on one server
+and exercise isolated managed views. The managed-view test creates a terminal in
+each view, rebinds one view to a higher epoch, verifies the old extension host
+exited while its terminal stayed alive, verifies the other view is unaffected,
+and closes both with PID exit evidence. It also checks normal-close dirty
+rejection, the service-worker scope, and a close-during-terminal-start race.
 
 ## Release entry
 
@@ -130,17 +134,17 @@ push to `kk-studio` builds all five packages; publishing requires an explicit
 workflow dispatch with `publish=true` or a `v*-kk.*` tag. The candidate tag is:
 
 ```text
-v4.141.0-kk.2
+v4.143.1-kk.1
 ```
 
 Expected assets per target:
 
 ```text
-code-server-4.141.0-kk.2-linux-amd64.tar.gz
-code-server-4.141.0-kk.2-linux-arm64.tar.gz
-code-server-4.141.0-kk.2-windows-amd64.tar.gz
-code-server-4.141.0-kk.2-macos-amd64.tar.gz
-code-server-4.141.0-kk.2-macos-arm64.tar.gz
+code-server-4.143.1-kk.1-linux-amd64.tar.gz
+code-server-4.143.1-kk.1-linux-arm64.tar.gz
+code-server-4.143.1-kk.1-windows-amd64.tar.gz
+code-server-4.143.1-kk.1-macos-amd64.tar.gz
+code-server-4.143.1-kk.1-macos-arm64.tar.gz
 ```
 
 Each archive has a `.sha256` file and a `-source.json` file. The publish job
