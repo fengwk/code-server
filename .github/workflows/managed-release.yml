@@ -53,7 +53,7 @@ jobs:
             arch: amd64
             vscode_target: darwin-x64
             npm_arch: x64
-          - runner: macos-latest
+          - runner: macos-14
             asset: macos-arm64
             os: macos
             arch: arm64
@@ -86,7 +86,7 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             version=${GITHUB_REF_NAME#v}
           else
-            version=4.143.1-kk.1
+            version=4.143.1-kk.2
           fi
           case "$version" in
             *-kk.*) ;;
@@ -325,7 +325,7 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             tag=$GITHUB_REF_NAME
           else
-            tag=v4.143.1-kk.1
+            tag=v4.143.1-kk.2
           fi
           version=${tag#v}
           repo=$GITHUB_REPOSITORY

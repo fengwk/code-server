@@ -1,6 +1,6 @@
 # Managed views
 
-This fork (`4.143.1-kk.1`, Code `1.143.1`) exposes isolated code-server views to
+This fork (`4.143.1-kk.2`, Code `1.143.1`) exposes isolated code-server views to
 the KK Studio daemon. A view is a browser workbench bound to one workspace,
 binding epoch, extension host, terminal set and management connection.
 
@@ -101,7 +101,7 @@ With the VS Code submodule checked out and patches applied as described in the
 # Node 24 is required by .node-version and lib/vscode/.nvmrc.
 nvm use
 npm ci
-export VERSION=4.143.1-kk.1
+export VERSION=4.143.1-kk.2
 npm run build
 npm run build:vscode
 KEEP_MODULES=1 npm run release
@@ -134,17 +134,17 @@ push to `kk-studio` builds all five packages; publishing requires an explicit
 workflow dispatch with `publish=true` or a `v*-kk.*` tag. The candidate tag is:
 
 ```text
-v4.143.1-kk.1
+v4.143.1-kk.2
 ```
 
 Expected assets per target:
 
 ```text
-code-server-4.143.1-kk.1-linux-amd64.tar.gz
-code-server-4.143.1-kk.1-linux-arm64.tar.gz
-code-server-4.143.1-kk.1-windows-amd64.tar.gz
-code-server-4.143.1-kk.1-macos-amd64.tar.gz
-code-server-4.143.1-kk.1-macos-arm64.tar.gz
+code-server-4.143.1-kk.2-linux-amd64.tar.gz
+code-server-4.143.1-kk.2-linux-arm64.tar.gz
+code-server-4.143.1-kk.2-windows-amd64.tar.gz
+code-server-4.143.1-kk.2-macos-amd64.tar.gz
+code-server-4.143.1-kk.2-macos-arm64.tar.gz
 ```
 
 Each archive has a `.sha256` file and a `-source.json` file. The publish job

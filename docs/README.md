@@ -65,7 +65,7 @@ configuration](https://coder.com/docs/code-server/latest/guide) guide.
 
 This KK Studio fork adds workspace-isolated managed views for the local daemon.
 See [managed views](managed-views.md) for the API, lifecycle guarantees, current
-limitations and the `4.143.1-kk.1` release entry.
+limitations and the `4.143.1-kk.2` release entry.
 
 ## Questions?
 

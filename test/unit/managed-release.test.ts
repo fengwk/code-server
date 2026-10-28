@@ -22,11 +22,13 @@ describe("managed release", () => {
 
   // The candidate version is fixed in one place: dispatch and tag publishes
   // must agree, and the source metadata keeps the upstream Code tag separate.
-  it("targets the 4.143.1-kk.1 candidate consistently", () => {
-    assert.equal(workflow.match(/4\.143\.1-kk\.1/g)?.length, 2)
+  it("targets the 4.143.1-kk.2 candidate consistently", () => {
+    assert.equal(workflow.match(/4\.143\.1-kk\.2/g)?.length, 2)
     assert.doesNotMatch(workflow, /4\.141\.0-kk\.2/)
+    assert.doesNotMatch(workflow, /4\.143\.1-kk\.1/)
     assert.ok(workflow.includes('--arg upstreamTag "v4.143.1"'))
-    assert.ok(workflow.includes("tag=v4.143.1-kk.1"))
+    assert.ok(workflow.includes("version=4.143.1-kk.2"))
+    assert.ok(workflow.includes("tag=v4.143.1-kk.2"))
   })
 
   // A managed-view patch that misses a VS Code file leaves the built server
@@ -114,7 +116,18 @@ describe("managed release", () => {
     const parsed = yaml.load(workflow) as {
       jobs: {
         package: {
-          strategy: { matrix: { include: { asset: string }[] } }
+          strategy: {
+            matrix: {
+              include: {
+                asset: string
+                runner: string
+                os: string
+                arch: string
+                vscode_target: string
+                npm_arch: string
+              }[]
+            }
+          }
           steps: { name?: string; if?: string; run?: string }[]
         }
       }
@@ -123,6 +136,18 @@ describe("managed release", () => {
     assert.deepEqual(
       job.strategy.matrix.include.map(({ asset }) => asset),
       ["linux-amd64", "linux-arm64", "windows-amd64", "macos-amd64", "macos-arm64"],
+    )
+    // Check the runner and target together for the macOS ARM native build.
+    assert.deepEqual(
+      job.strategy.matrix.include.find(({ asset }) => asset === "macos-arm64"),
+      {
+        runner: "macos-14",
+        asset: "macos-arm64",
+        os: "macos",
+        arch: "arm64",
+        vscode_target: "darwin-arm64",
+        npm_arch: "arm64",
+      },
     )
     const build = job.steps.find(({ name }) => name === "Build from source")!
     assert.equal(build.if, undefined)
