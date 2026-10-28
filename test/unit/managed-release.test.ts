@@ -50,6 +50,7 @@ describe("managed release", () => {
       "src/vs/server/node/remoteTerminalChannel.ts",
       "src/vs/server/node/serverServices.ts",
       "src/vs/server/node/webClientServer.ts",
+      "src/vs/server/test/node/managedViews.test.ts",
     ]) {
       assert.ok(patch.includes(`diff --git a/lib/vscode/${file} b/lib/vscode/${file}`), file)
     }

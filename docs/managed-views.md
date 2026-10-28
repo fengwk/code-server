@@ -71,6 +71,11 @@ messages.
   cannot observe renderer-only unsaved buffers, so it never claims that a
   workspace is clean. The daemon bridge performs its own dirty check and calls
   this API with `discard` only after that check passes.
+- **Closed-history retention:** both the local manager and the embedded VS Code
+  tracker retain at most 256 confirmed `CLOSED` records. `inspect` and `close`
+  idempotency is guaranteed only while a record remains in that window; older
+  closed identities are forgotten and return `VIEW_NOT_FOUND`. `OPEN`,
+  `CLOSING` and `CLEANUP_FAILED` records are never evicted.
 
 ## Current limitations
 

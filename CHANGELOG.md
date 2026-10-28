@@ -40,6 +40,15 @@ Code v1.141.0
   token check. Browser-supplied managed-view identity headers are stripped
   before they reach VS Code.
 
+### Fixed
+
+- Per-view lifecycle locks are released after every completed operation, so
+  repeatedly creating and closing normal unique views no longer accumulates
+  lock entries.
+- Closed-view tombstones are bounded at 256 confirmed, fully released records
+  in both the local manager and the embedded VS Code tracker. Active or
+  retryable views are never evicted.
+
 ## Unreleased
 
 Code v1.141.0

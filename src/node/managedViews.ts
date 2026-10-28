@@ -806,10 +806,18 @@ export class ManagedViewManager {
   private withLock<T>(viewId: string, task: () => Promise<T>): Promise<T> {
     const previous = this.locks.get(viewId) ?? Promise.resolve()
     const next = previous.then(task, task)
-    this.locks.set(
-      viewId,
-      next.catch(() => undefined),
+    const tail = next.then(
+      () => undefined,
+      () => undefined,
     )
+    this.locks.set(viewId, tail)
+    void tail.then(() => {
+      // Only release this chain's tail. A later queued operation may already
+      // have replaced it, and must remain serialized behind its predecessor.
+      if (this.locks.get(viewId) === tail) {
+        this.locks.delete(viewId)
+      }
+    })
     return next
   }
 }

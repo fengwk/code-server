@@ -21,6 +21,29 @@ import {
 
 const VIEW_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 const VIEW_B = "22222222-2222-4222-8222-222222222222"
+const VIEW_C = "33333333-3333-4333-8333-333333333333"
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void
+  const promise = new Promise<void>((settle) => {
+    resolve = settle
+  })
+  return { promise, resolve }
+}
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2000
+  while (!condition()) {
+    if (Date.now() > deadline) {
+      throw new Error("condition was not met before the test deadline")
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  }
+}
+
+function lockCount(manager: ManagedViewManager): number {
+  return (manager as unknown as { locks: Map<string, Promise<unknown>> }).locks.size
+}
 
 class FakeResource extends EventEmitter {
   destroyed = false
@@ -42,11 +65,20 @@ class FakeRuntime implements ManagedViewRuntime {
   readonly records = new Map<string, ManagedViewRuntimeInspection>()
   failClose = false
   failRebind = false
+  failRegister = false
+  registerGate: Promise<void> | undefined
+  rebindGate: Promise<void> | undefined
   async registerView(
     viewId: string,
     bindingEpoch: string,
     workspacePath: string,
   ): Promise<ManagedViewRuntimeRegistration> {
+    if (this.failRegister) {
+      throw new Error("register failed")
+    }
+    if (this.registerGate) {
+      await this.registerGate
+    }
     this.registrations.push(`${viewId}:${bindingEpoch}`)
     if (!this.records.has(viewId)) {
       this.records.set(viewId, {
@@ -71,6 +103,9 @@ class FakeRuntime implements ManagedViewRuntime {
     workspacePath: string,
   ): Promise<ManagedViewRuntimeRebind> {
     this.rebinds.push(`${viewId}:${fromBindingEpoch}->${bindingEpoch}`)
+    if (this.rebindGate) {
+      await this.rebindGate
+    }
     const record = this.records.get(viewId)
     if (!record || record.bindingEpoch !== fromBindingEpoch || record.workspacePath !== workspacePath) {
       throw new Error("missing")
@@ -319,6 +354,61 @@ describe("managed view lifecycle", () => {
     expect(runtime.closes).toEqual([VIEW_A])
     const inspected = await manager.inspect(VIEW_A, "1", runtime)
     expect(inspected.state).toBe("CLOSED")
+  })
+
+  test("forgets only the oldest closed identities outside the retention window", async () => {
+    manager.dispose()
+    manager = new ManagedViewManager({
+      managementToken: "token",
+      resourceExitTimeoutMs: 25,
+      closedViewLimit: 2,
+    })
+    for (const viewId of [VIEW_A, VIEW_B, VIEW_C]) {
+      await manager.register(viewId, "1", workspaceA, runtime)
+      await manager.close(viewId, "1", "expired", runtime)
+    }
+
+    expect(manager.hasView(VIEW_A)).toBe(false)
+    expect(manager.hasView(VIEW_B)).toBe(true)
+    expect(manager.hasView(VIEW_C)).toBe(true)
+    await expect(manager.inspect(VIEW_A, "1", runtime)).rejects.toMatchObject({ code: "VIEW_NOT_FOUND" })
+    await expect(manager.inspect(VIEW_C, "1", runtime)).resolves.toMatchObject({ state: "CLOSED" })
+    await expect(manager.close(VIEW_C, "1", "discard", runtime)).resolves.toMatchObject({ state: "CLOSED" })
+  })
+
+  test("serializes queued operations and releases only the current lock tail", async () => {
+    const registerGate = deferred()
+    const rebindGate = deferred()
+    runtime.registerGate = registerGate.promise
+    runtime.rebindGate = rebindGate.promise
+
+    const first = manager.register(VIEW_A, "1", workspaceA, runtime)
+    const second = manager.register(VIEW_A, "2", workspaceA, runtime)
+    registerGate.resolve()
+    expect((await first).bindingEpoch).toBe("1")
+
+    await waitFor(() => runtime.rebinds.length === 1)
+    const third = manager.register(VIEW_A, "3", workspaceA, runtime)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    // A completed predecessor must not drop the queued operation's tail lock.
+    expect(runtime.rebinds).toEqual([`${VIEW_A}:1->2`])
+
+    rebindGate.resolve()
+    const [secondResult, thirdResult] = await Promise.all([second, third])
+    expect(secondResult.bindingEpoch).toBe("2")
+    expect(thirdResult.bindingEpoch).toBe("3")
+    expect(runtime.rebinds).toEqual([`${VIEW_A}:1->2`, `${VIEW_A}:2->3`])
+    await waitFor(() => lockCount(manager) === 0)
+  })
+
+  test("releases a failed view lock for later attempts", async () => {
+    runtime.failRegister = true
+    await expect(manager.register(VIEW_A, "1", workspaceA, runtime)).rejects.toThrow("register failed")
+    await waitFor(() => lockCount(manager) === 0)
+
+    runtime.failRegister = false
+    await expect(manager.register(VIEW_A, "1", workspaceA, runtime)).resolves.toMatchObject({ state: "OPEN" })
+    await waitFor(() => lockCount(manager) === 0)
   })
 
   test("normal close is rejected while dirty is unknown", async () => {

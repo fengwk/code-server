@@ -272,10 +272,10 @@ index 06d614be..81803aa0 100644
  
 diff --git a/lib/vscode/src/vs/server/node/managedViews.ts b/lib/vscode/src/vs/server/node/managedViews.ts
 new file mode 100644
-index 00000000..a7127274
+index 00000000..6b541786
 --- /dev/null
 +++ b/lib/vscode/src/vs/server/node/managedViews.ts
-@@ -0,0 +1,600 @@
+@@ -0,0 +1,655 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -359,6 +359,7 @@ index 00000000..a7127274
 +	readonly id: number;
 +	readonly pid?: number;
 +	readonly exit: Promise<void>;
++	setPid(pid: number): void;
 +	terminate(): Promise<void>;
 +}
 +
@@ -379,6 +380,7 @@ index 00000000..a7127274
 +}
 +
 +const CLEANUP_TIMEOUT_MS = 15_000;
++const CLOSED_VIEW_LIMIT = 256;
 +const DRAFT_BACKUP_REASON =
 +	'code-server cannot observe renderer-only unsaved buffers; dirty is reported as unknown and close never claims the workspace is clean';
 +
@@ -518,13 +520,35 @@ index 00000000..a7127274
 +		if (!record || record.bindingEpoch !== bindingEpoch) {
 +			throw new Error('view is not registered');
 +		}
++		await this.refreshTerminalPids(record);
 +		return this.inspection(record);
 +	}
 +
 +	async listViews(): Promise<ManagedViewRuntimeInspection[]> {
-+		return Array.from(this.records.values())
-+			.filter((record) => record.state !== 'CLOSED')
-+			.map((record) => this.inspection(record));
++		const records = Array.from(this.records.values()).filter((record) => record.state !== 'CLOSED');
++		await Promise.all(records.map((record) => this.refreshTerminalPids(record)));
++		return records.map((record) => this.inspection(record));
++	}
++
++	private async refreshTerminalPids(record: ViewRecord): Promise<void> {
++		const ptyService = this.ptyService;
++		if (!ptyService || record.terminals.size === 0) {
++			return;
++		}
++		// Process-ready can fire before the terminal is attached to this tracker.
++		// Resolve any missing PIDs from the PTY host on each inspection.
++		const processes = await ptyService.listProcesses().catch(() => undefined);
++		if (!processes) {
++			return;
++		}
++		for (const [id, handle] of record.terminals) {
++			if (handle.pid === undefined) {
++				const process = processes.find((candidate) => candidate.id === id);
++				if (process) {
++					handle.setPid(process.pid);
++				}
++			}
++		}
 +	}
 +
 +	attachManagementConnection(viewId: string, bindingEpoch: string, handle: ManagedManagementHandle): boolean {
@@ -604,15 +628,12 @@ index 00000000..a7127274
 +			resolveExit();
 +		};
 +		// The ready and exit events can fire before this ownership listener is
-+		// attached. A missing process means the pty host has no live process.
++		// attached. A missing process here only means the PTY host has not
++		// registered it yet; inspections refresh missing PIDs later.
 +		void ptyService.listProcesses().then((processes) => {
 +			const process = processes.find((candidate) => candidate.id === id);
-+			if (process) {
-+				if (pid === undefined) {
-+					pid = process.pid;
-+				}
-+			} else {
-+				markExited();
++			if (process && pid === undefined) {
++				pid = process.pid;
 +			}
 +		}, () => {
 +			// The exit listener remains the only proof if the list call fails.
@@ -626,6 +647,11 @@ index 00000000..a7127274
 +			id,
 +			get pid() {
 +				return pid;
++			},
++			setPid(value: number) {
++				if (!exited && pid === undefined) {
++					pid = value;
++				}
 +			},
 +			exit,
 +			async terminate(): Promise<void> {
@@ -852,6 +878,7 @@ index 00000000..a7127274
 +			record.state = 'CLOSED';
 +			record.failures = [];
 +			record.lastClose = result;
++			this.pruneClosedViews();
 +			this._logService.info(`[ManagedView] closed ${record.viewId} epoch ${record.bindingEpoch}`);
 +		} else {
 +			record.state = 'CLEANUP_FAILED';
@@ -859,6 +886,34 @@ index 00000000..a7127274
 +			this._logService.error(`[ManagedView] close failed ${record.viewId}: ${failures.join('; ')}`);
 +		}
 +		return result;
++	}
++
++	private pruneClosedViews(): void {
++		let closed = 0;
++		for (const record of this.records.values()) {
++			if (record.state === 'CLOSED') {
++				closed++;
++			}
++		}
++		if (closed <= CLOSED_VIEW_LIMIT) {
++			return;
++		}
++		for (const [viewId, record] of this.records) {
++			if (closed <= CLOSED_VIEW_LIMIT) {
++				break;
++			}
++			// Idempotency is retained only for confirmed, fully released closes.
++			// Active or retryable records must stay addressable.
++			const released = record.state === 'CLOSED'
++				&& record.pendingResources === 0
++				&& record.management.size === 0
++				&& record.extensionHosts.size === 0
++				&& record.terminals.size === 0;
++			if (released) {
++				this.records.delete(viewId);
++				closed--;
++			}
++		}
 +	}
 +
 +	private inspection(record: ViewRecord): ManagedViewRuntimeInspection {
@@ -1329,3 +1384,74 @@ index a0391a1b..783954b7 100644
  		const forwardedPrefix = getFirstHeader('x-forwarded-prefix');
  		const basePath = vscodeBase || (forwardedPrefix && isSafeBasePath(forwardedPrefix) ? forwardedPrefix : this._basePath);
  
+diff --git a/lib/vscode/src/vs/server/test/node/managedViews.test.ts b/lib/vscode/src/vs/server/test/node/managedViews.test.ts
+new file mode 100644
+index 00000000..2a5357d0
+--- /dev/null
++++ b/lib/vscode/src/vs/server/test/node/managedViews.test.ts
+@@ -0,0 +1,65 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import assert from 'assert';
++import { NullLogService } from '../../../platform/log/common/log.js';
++import { ManagedViewTracker } from '../../node/managedViews.js';
++
++function viewId(index: number): string {
++	return `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`;
++}
++
++async function closeViews(tracker: ManagedViewTracker, from: number, to: number): Promise<void> {
++	for (let index = from; index <= to; index++) {
++		const id = viewId(index);
++		await tracker.registerView(id, '1', '/workspace');
++		const result = await tracker.closeView(id, '1', 'expired');
++		assert.strictEqual(result.state, 'CLOSED');
++	}
++}
++
++suite('ManagedViewTracker', () => {
++	test('bounds confirmed closed tombstones and keeps recent identities idempotent', async () => {
++		const tracker = new ManagedViewTracker(new NullLogService());
++		await closeViews(tracker, 0, 256);
++
++		await assert.rejects(tracker.inspectView(viewId(0), '1'), /view is not registered/);
++		const newest = await tracker.inspectView(viewId(256), '1');
++		assert.strictEqual(newest.state, 'CLOSED');
++	});
++
++	test('does not evict active records while pruning closed tombstones', async () => {
++		const tracker = new ManagedViewTracker(new NullLogService());
++		const active = viewId(0);
++		await tracker.registerView(active, '1', '/workspace');
++		await closeViews(tracker, 1, 257);
++
++		const inspected = await tracker.inspectView(active, '1');
++		assert.strictEqual(inspected.state, 'OPEN');
++	});
++
++	test('refreshes a terminal PID that was not registered at attach time', async () => {
++		const tracker = new ManagedViewTracker(new NullLogService());
++		let process: { id: number; pid: number } | undefined;
++		const ptyService = {
++			onProcessReady: () => ({ dispose: () => undefined }),
++			onProcessExit: () => ({ dispose: () => undefined }),
++			listProcesses: async () => process ? [process] : [],
++		} as unknown as Parameters<ManagedViewTracker['setPtyService']>[0];
++		tracker.setPtyService(ptyService);
++
++		const id = viewId(0);
++		await tracker.registerView(id, '1', '/workspace');
++		assert.strictEqual(tracker.attachTerminal(id, '1', 7), true);
++
++		let inspected = await tracker.inspectView(id, '1');
++		assert.strictEqual(inspected.terminals.length, 1);
++		assert.strictEqual(inspected.terminals[0].pid, undefined);
++
++		process = { id: 7, pid: 1234 };
++		inspected = await tracker.inspectView(id, '1');
++		assert.strictEqual(inspected.terminals[0].pid, 1234);
++	});
++});
