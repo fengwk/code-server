@@ -1,7 +1,7 @@
-import { logger } from "@coder/logger"
 import * as express from "express"
 import * as http from "http"
 import * as net from "net"
+import { ensureAuthenticated, ensureOrigin } from "../http"
 import {
   isLoopbackAddress,
   logManagedViewError,
@@ -17,7 +17,6 @@ import {
   parseInspectEpoch,
   parseRegisterBody,
 } from "../managedViews"
-import { ensureAuthenticated, ensureOrigin } from "../http"
 import { SocketProxyProvider } from "../socket"
 import { type WebsocketRequest, Router as WsRouter } from "../wsRouter"
 import { createStaticHandler } from "./static"
@@ -34,6 +33,14 @@ function sendJson(res: express.Response, status: number, body: unknown): void {
 
 function sendError(res: express.Response, error: ManagedViewError): void {
   sendJson(res, error.status, { error: error.code, message: error.message })
+}
+
+function isBodyParserError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("type" in error)) {
+    return false
+  }
+  const type = (error as { type?: unknown }).type
+  return typeof type === "string" && type.startsWith("entity.")
 }
 
 function requireManagementAccess(manager: ManagedViewManager): express.RequestHandler {
@@ -57,7 +64,6 @@ function requireManagementAccess(manager: ManagedViewManager): express.RequestHa
     next()
   }
 }
-
 
 export function createManagementRouter(manager: ManagedViewManager): express.Router {
   const router = express.Router()
@@ -126,7 +132,7 @@ export function createManagementRouter(manager: ManagedViewManager): express.Rou
       sendError(res, error)
       return
     }
-    if (error instanceof SyntaxError || (typeof error === "object" && error !== null && "type" in error)) {
+    if (error instanceof SyntaxError || isBodyParserError(error)) {
       sendJson(res, 400, { error: "INVALID_BODY", message: "request body must be a bounded JSON object" })
       return
     }
@@ -221,42 +227,30 @@ export function createViewRouters(manager: ManagedViewManager): ManagedViewRoute
     await server.handleRequest(req, res)
   })
 
-  wsRouter.ws(
-    /.*/,
-    ensureOrigin,
-    ensureAuthenticated,
-    ensureVSCodeLoaded,
-    async (req: WebsocketRequest) => {
-      const params = managedViewParams(req)
-      if (!manager.isOpen(params.viewId, params.bindingEpoch)) {
-        req.ws.end("HTTP/1.1 410 Gone\r\nConnection: close\r\n\r\n")
-        return
-      }
-      if (!manager.trackWebSocket(params.viewId, params.bindingEpoch, req.ws)) {
-        req.ws.end("HTTP/1.1 410 Gone\r\nConnection: close\r\n\r\n")
-        return
-      }
-      applyManagedViewHeaders(req, params)
-      const server = getVSCodeServer()
-      if (!server) {
-        req.ws.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
-        return
-      }
-      const wrappedSocket = await socketProxyProvider.createProxy(req.ws)
-      server.handleUpgrade(req, wrappedSocket as net.Socket)
-      req.ws.resume()
-    },
-  )
+  wsRouter.ws(/.*/, ensureOrigin, ensureAuthenticated, ensureVSCodeLoaded, async (req: WebsocketRequest) => {
+    const params = managedViewParams(req)
+    if (!manager.isOpen(params.viewId, params.bindingEpoch)) {
+      req.ws.end("HTTP/1.1 410 Gone\r\nConnection: close\r\n\r\n")
+      return
+    }
+    if (!manager.trackWebSocket(params.viewId, params.bindingEpoch, req.ws)) {
+      req.ws.end("HTTP/1.1 410 Gone\r\nConnection: close\r\n\r\n")
+      return
+    }
+    applyManagedViewHeaders(req, params)
+    const server = getVSCodeServer()
+    if (!server) {
+      req.ws.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
+      return
+    }
+    const wrappedSocket = await socketProxyProvider.createProxy(req.ws)
+    server.handleUpgrade(req, wrappedSocket as net.Socket)
+    req.ws.resume()
+  })
 
   return {
     router,
     wsRouter: wsRouter.router,
     dispose: () => socketProxyProvider.stop(),
-  }
-}
-
-export function logViewRoutingError(error: unknown): void {
-  if (error instanceof ManagedViewError) {
-    logger.debug(`managed views: rejected ${error.code}`)
   }
 }

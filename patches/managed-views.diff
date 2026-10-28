@@ -70,7 +70,7 @@ index e63de4e5..9a633ca0 100644
 +	bindingEpoch?: string;
  }
 diff --git a/lib/vscode/src/vs/server/node/extensionHostConnection.ts b/lib/vscode/src/vs/server/node/extensionHostConnection.ts
-index 06d614be..9650e477 100644
+index 06d614be..81803aa0 100644
 --- a/lib/vscode/src/vs/server/node/extensionHostConnection.ts
 +++ b/lib/vscode/src/vs/server/node/extensionHostConnection.ts
 @@ -22,6 +22,7 @@ import { getNLSConfiguration } from './remoteLanguagePacks.js';
@@ -81,20 +81,22 @@ index 06d614be..9650e477 100644
  
  export async function buildUserEnvironment(startParamsEnv: { [key: string]: string | null } = {}, withUserShellEnvironment: boolean, language: string, environmentService: IServerEnvironmentService, logService: ILogService, configurationService: IConfigurationService): Promise<IProcessEnvironment> {
  	const nlsConfig = await getNLSConfiguration(language, environmentService.userDataPath);
-@@ -115,6 +116,12 @@ export class ExtensionHostConnection extends Disposable {
+@@ -115,6 +116,14 @@ export class ExtensionHostConnection extends Disposable {
  	private _remoteAddress: string;
  	private _extensionHostProcess: cp.ChildProcess | null;
  	private _connectionData: ConnectionData | null;
 +	private _managedViews: ManagedViewTracker | undefined;
 +	private _managedView: ManagedViewContext | undefined;
++	private _managedStart: Promise<void> | undefined;
 +	private _managedTermination: Promise<void> | undefined;
 +	private _managedExit: Promise<void> | undefined;
++	private _managedTerminating = false;
 +	private _managedDetached = false;
 +	private _managedPid: number | undefined;
  
  	constructor(
  		private readonly _reconnectionToken: string,
-@@ -127,6 +134,7 @@ export class ExtensionHostConnection extends Disposable {
+@@ -127,6 +136,7 @@ export class ExtensionHostConnection extends Disposable {
  		@IConfigurationService private readonly _configurationService: IConfigurationService
  	) {
  		super();
@@ -102,7 +104,7 @@ index 06d614be..9650e477 100644
  		this._canSendSocket = (!isWindows || !this._environmentService.args['socket-path']);
  		this._disposed = false;
  		this._remoteAddress = remoteAddress;
-@@ -139,6 +147,37 @@ export class ExtensionHostConnection extends Disposable {
+@@ -139,6 +149,43 @@ export class ExtensionHostConnection extends Disposable {
  		this._log(`New connection established.`);
  	}
  
@@ -128,7 +130,13 @@ index 06d614be..9650e477 100644
 +	public terminate(): Promise<void> {
 +		if (!this._managedTermination) {
 +			this._managedTermination = (async () => {
++				this._managedTerminating = true;
 +				this._cleanResources();
++				// A start already in flight must either stop before forking or kill
++				// and await the child it created.
++				if (this._managedStart) {
++					await this._managedStart.catch(() => undefined);
++				}
 +				if (this._managedExit) {
 +					await this._managedExit;
 +				}
@@ -140,7 +148,7 @@ index 06d614be..9650e477 100644
  	override dispose(): void {
  		this._cleanResources();
  		super.dispose();
-@@ -237,13 +276,33 @@ export class ExtensionHostConnection extends Disposable {
+@@ -237,14 +284,59 @@ export class ExtensionHostConnection extends Disposable {
  			this._connectionData.socket.end();
  			this._connectionData = null;
  		}
@@ -150,20 +158,26 @@ index 06d614be..9650e477 100644
 +		const extensionHostProcess = this._extensionHostProcess;
 +		this._extensionHostProcess = null;
 +		if (extensionHostProcess) {
-+			const alreadyExited = extensionHostProcess.exitCode !== null || extensionHostProcess.signalCode !== null;
-+			this._managedExit = alreadyExited
-+				? Promise.resolve()
-+				: new Promise<void>((resolve) => extensionHostProcess.once('exit', () => resolve()));
-+			if (!alreadyExited) {
-+				extensionHostProcess.kill();
-+			}
-+			void this._managedExit.then(() => this._detachManagedView());
++			void this._terminateExtensionHostProcess(extensionHostProcess);
 +		} else {
 +			this._detachManagedView();
  		}
  		this._onClose.fire(undefined);
  	}
  
+-	public async start(startParams: IRemoteExtensionHostStartParams): Promise<void> {
++	private _terminateExtensionHostProcess(extensionHostProcess: cp.ChildProcess): Promise<void> {
++		const alreadyExited = extensionHostProcess.exitCode !== null || extensionHostProcess.signalCode !== null;
++		this._managedExit = alreadyExited
++			? Promise.resolve()
++			: new Promise<void>((resolve) => extensionHostProcess.once('exit', () => resolve()));
++		if (!alreadyExited) {
++			extensionHostProcess.kill();
++		}
++		void this._managedExit.then(() => this._detachManagedView());
++		return this._managedExit;
++	}
++
 +	private _detachManagedView(): void {
 +		if (this._managedDetached) {
 +			return;
@@ -174,10 +188,44 @@ index 06d614be..9650e477 100644
 +		}
 +	}
 +
- 	public async start(startParams: IRemoteExtensionHostStartParams): Promise<void> {
++	public start(startParams: IRemoteExtensionHostStartParams): Promise<void> {
++		if (this._managedTerminating) {
++			this._cleanResources();
++			return Promise.resolve();
++		}
++		if (!this._managedStart) {
++			this._managedStart = this._start(startParams);
++		}
++		return this._managedStart;
++	}
++
++	private async _start(startParams: IRemoteExtensionHostStartParams): Promise<void> {
++		let managedPending = false;
++		if (this._managedViews && this._managedView) {
++			managedPending = this._managedViews.beginExtensionHostStart(this._managedView.viewId, this._managedView.bindingEpoch);
++			if (!managedPending) {
++				this._log(`Managed view closed before the extension host started.`);
++				this._cleanResources();
++				return;
++			}
++		}
  		try {
  			let execArgv: string[] = process.execArgv ? process.execArgv.filter(a => !/^--inspect(-brk)?=/.test(a)) : [];
-@@ -289,8 +348,17 @@ export class ExtensionHostConnection extends Disposable {
+ 			// eslint-disable-next-line local/code-no-any-casts, @typescript-eslint/no-explicit-any
+@@ -280,6 +372,12 @@ export class ExtensionHostConnection extends Disposable {
+ 			// Refs https://github.com/microsoft/vscode/issues/189805
+ 			opts.execArgv.unshift('--dns-result-order=ipv4first');
+ 
++			if (this._disposed || this._managedTerminating) {
++				this._log(`Extension host start was cancelled before the process launched.`);
++				this._cleanResources();
++				return;
++			}
++
+ 			// Run Extension Host as fork of current process
+ 			const args = ['--type=extensionHost', `--transformURIs`];
+ 			const useHostProxy = this._environmentService.args['use-host-proxy'];
+@@ -289,8 +387,30 @@ export class ExtensionHostConnection extends Disposable {
  			}
  			this._extensionHostProcess = cp.fork(FileAccess.asFileUri('bootstrap-fork').fsPath, args, opts);
  			const pid = this._extensionHostProcess.pid;
@@ -187,7 +235,20 @@ index 06d614be..9650e477 100644
 +			if (this._managedViews && this._managedView) {
 +				if (!this._managedViews.attachExtensionHost(this._managedView.viewId, this._managedView.bindingEpoch, this)) {
 +					this._log(`Managed view closed before the extension host could be registered; terminating it.`);
-+					this._cleanResources();
++					const extensionHostProcess = this._extensionHostProcess;
++					this._extensionHostProcess = null;
++					if (this._disposed || this._managedTerminating) {
++						if (extensionHostProcess) {
++							await this._terminateExtensionHostProcess(extensionHostProcess);
++						} else {
++							this._detachManagedView();
++						}
++					} else {
++						this._cleanResources();
++						if (this._managedExit) {
++							await this._managedExit;
++						}
++					}
 +					return;
 +				}
 +			}
@@ -195,12 +256,26 @@ index 06d614be..9650e477 100644
  			// Catch all output coming from the extension host process
  			this._extensionHostProcess.stdout!.setEncoding('utf8');
  			this._extensionHostProcess.stderr!.setEncoding('utf8');
+@@ -332,6 +452,13 @@ export class ExtensionHostConnection extends Disposable {
+ 			this._logError(`Failed to start extension host process`);
+ 			this._logService.error(error);
+ 			this._cleanResources();
++			if (this._managedExit) {
++				await this._managedExit;
++			}
++		} finally {
++			if (managedPending && this._managedViews && this._managedView) {
++				this._managedViews.endExtensionHostStart(this._managedView.viewId, this._managedView.bindingEpoch);
++			}
+ 		}
+ 	}
+ 
 diff --git a/lib/vscode/src/vs/server/node/managedViews.ts b/lib/vscode/src/vs/server/node/managedViews.ts
 new file mode 100644
-index 00000000..8c468855
+index 00000000..a7127274
 --- /dev/null
 +++ b/lib/vscode/src/vs/server/node/managedViews.ts
-@@ -0,0 +1,470 @@
+@@ -0,0 +1,600 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -283,6 +358,7 @@ index 00000000..8c468855
 +interface TerminalHandle {
 +	readonly id: number;
 +	readonly pid?: number;
++	readonly exit: Promise<void>;
 +	terminate(): Promise<void>;
 +}
 +
@@ -295,6 +371,9 @@ index 00000000..8c468855
 +	extensionHosts: Set<ManagedExtensionHostHandle>;
 +	terminals: Map<number, TerminalHandle>;
 +	failures: string[];
++	/** Creates and extension-host starts admitted before CLOSING must settle first. */
++	pendingResources: number;
++	pendingWaiters: Set<() => void>;
 +	closePromise?: Promise<ManagedViewRuntimeClose>;
 +	lastClose?: ManagedViewRuntimeClose;
 +}
@@ -344,6 +423,67 @@ index 00000000..8c468855
 +		return !!record && record.bindingEpoch === bindingEpoch && record.state === 'OPEN';
 +	}
 +
++	/** Reserve a terminal creation before spawning the shell so close can wait for it. */
++	beginTerminalCreate(viewId: string, bindingEpoch: string): boolean {
++		return this.beginPendingResource(viewId, bindingEpoch);
++	}
++
++	endTerminalCreate(viewId: string, bindingEpoch: string): void {
++		this.endPendingResource(viewId, bindingEpoch);
++	}
++
++	/** Reserve an extension-host start so rebind/close cannot miss a late child process. */
++	beginExtensionHostStart(viewId: string, bindingEpoch: string): boolean {
++		return this.beginPendingResource(viewId, bindingEpoch);
++	}
++
++	endExtensionHostStart(viewId: string, bindingEpoch: string): void {
++		this.endPendingResource(viewId, bindingEpoch);
++	}
++
++	private beginPendingResource(viewId: string, bindingEpoch: string): boolean {
++		const record = this.records.get(viewId);
++		if (!record || record.bindingEpoch !== bindingEpoch || record.state !== 'OPEN') {
++			return false;
++		}
++		record.pendingResources++;
++		return true;
++	}
++
++	private endPendingResource(viewId: string, bindingEpoch: string): void {
++		const record = this.records.get(viewId);
++		if (!record || record.bindingEpoch !== bindingEpoch) {
++			return;
++		}
++		record.pendingResources = Math.max(0, record.pendingResources - 1);
++		if (record.pendingResources === 0) {
++			const waiters = [...record.pendingWaiters];
++			record.pendingWaiters.clear();
++			for (const waiter of waiters) {
++				waiter();
++			}
++		}
++	}
++
++	private waitForPendingResources(record: ViewRecord): Promise<void> {
++		if (record.pendingResources === 0) {
++			return Promise.resolve();
++		}
++		return new Promise<void>((resolve, reject) => {
++			let timer: ReturnType<typeof setTimeout>;
++			const finish = () => {
++				clearTimeout(timer);
++				record.pendingWaiters.delete(finish);
++				resolve();
++			};
++			timer = setTimeout(() => {
++				record.pendingWaiters.delete(finish);
++				reject(timeoutError());
++			}, CLEANUP_TIMEOUT_MS);
++			record.pendingWaiters.add(finish);
++		});
++	}
++
 +	async registerView(viewId: string, bindingEpoch: string, workspacePath: string): Promise<ManagedViewRuntimeRegistration> {
 +		const existing = this.records.get(viewId);
 +		if (existing && existing.state !== 'CLOSED') {
@@ -365,7 +505,9 @@ index 00000000..8c468855
 +			management: new Set(),
 +			extensionHosts: new Set(),
 +			terminals: new Map(),
-+			failures: []
++			failures: [],
++			pendingResources: 0,
++			pendingWaiters: new Set()
 +		});
 +		this._logService.info(`[ManagedView] registered ${viewId} epoch ${bindingEpoch}`);
 +		return { viewId, bindingEpoch, workspacePath, state: 'OPEN', created: true };
@@ -420,15 +562,23 @@ index 00000000..8c468855
 +	attachTerminal(viewId: string, bindingEpoch: string, id: number): boolean {
 +		const record = this.records.get(viewId);
 +		const ptyService = this.ptyService;
-+		if (!record || record.bindingEpoch !== bindingEpoch || record.state !== 'OPEN' || !ptyService) {
++		if (!record || record.bindingEpoch !== bindingEpoch || !ptyService || record.state === 'CLOSED') {
 +			return false;
 +		}
 +		if (record.terminals.has(id)) {
-+			return true;
++			return record.state === 'OPEN';
 +		}
++		// Track the process even if the view started closing while the shell was
++		// being launched. The caller shuts it down; retaining the handle prevents
++		// an untracked shell and lets a close retry observe its actual exit.
 +		const handle = this.createTerminalHandle(ptyService, id);
 +		record.terminals.set(id, handle);
-+		return true;
++		void handle.exit.then(() => {
++			if (record.terminals.get(id) === handle) {
++				record.terminals.delete(id);
++			}
++		});
++		return record.state === 'OPEN';
 +	}
 +
 +	private createTerminalHandle(ptyService: IPtyService, id: number): TerminalHandle {
@@ -443,34 +593,55 @@ index 00000000..8c468855
 +				pid = event.event.pid;
 +			}
 +		});
-+		// The ready event can fire before this ownership listener is attached.
-+		void ptyService.listProcesses().then((processes) => {
-+			if (pid === undefined) {
-+				pid = processes.find((process) => process.id === id)?.pid;
-+			}
-+		}, () => {
-+			// A missing process is still owned by its id and will be shut down by
-+			// shutdown(); this lookup only enriches the reported facts.
-+		});
-+		const exitListener = ptyService.onProcessExit((event) => {
-+			if (event.id !== id) {
++		let exitListener: { dispose(): void } = { dispose: () => undefined };
++		const markExited = () => {
++			if (exited) {
 +				return;
 +			}
 +			exited = true;
 +			readyListener.dispose();
 +			exitListener.dispose();
 +			resolveExit();
++		};
++		// The ready and exit events can fire before this ownership listener is
++		// attached. A missing process means the pty host has no live process.
++		void ptyService.listProcesses().then((processes) => {
++			const process = processes.find((candidate) => candidate.id === id);
++			if (process) {
++				if (pid === undefined) {
++					pid = process.pid;
++				}
++			} else {
++				markExited();
++			}
++		}, () => {
++			// The exit listener remains the only proof if the list call fails.
++		});
++		exitListener = ptyService.onProcessExit((event) => {
++			if (event.id === id) {
++				markExited();
++			}
 +		});
 +		return {
 +			id,
 +			get pid() {
 +				return pid;
 +			},
++			exit,
 +			async terminate(): Promise<void> {
 +				if (exited) {
 +					return;
 +				}
 +				await ptyService.shutdown(id, true);
++				if (exited) {
++					return;
++				}
++				// shutdown() resolves after the pty host drops the process. Verify
++				// that fact even if the exit event was missed.
++				const processes = await ptyService.listProcesses().catch(() => undefined);
++				if (processes && !processes.some((candidate) => candidate.id === id)) {
++					markExited();
++				}
 +				await exit;
 +			}
 +		};
@@ -484,7 +655,7 @@ index 00000000..8c468855
 +		if (BigInt(bindingEpoch) <= BigInt(fromBindingEpoch)) {
 +			throw new Error('rebind epoch must increase');
 +		}
-+		if (record.state !== 'OPEN') {
++		if (record.state !== 'OPEN' && record.state !== 'CLEANUP_FAILED') {
 +			throw new Error(`view cannot rebind from state ${record.state}`);
 +		}
 +
@@ -492,6 +663,21 @@ index 00000000..8c468855
 +		// resolves against the old epoch and is either closed below or retained as
 +		// a failure for an explicit retry.
 +		record.state = 'CLOSING';
++		try {
++			await this.waitForPendingResources(record);
++		} catch (error) {
++			const message = `pending managed resources did not settle: ${error instanceof Error ? error.message : 'unknown error'}`;
++			record.state = 'CLEANUP_FAILED';
++			record.failures = [message];
++			this._logService.error(`[ManagedView] rebind failed ${viewId}: ${message}`);
++			return {
++				state: 'CLEANUP_FAILED',
++				failures: [message],
++				releasedManagementConnections: 0,
++				releasedExtensionHosts: 0,
++				preservedTerminals: record.terminals.size
++			};
++		}
 +		const management = [...record.management];
 +		const extensionHosts = [...record.extensionHosts];
 +		const failures: string[] = [];
@@ -583,6 +769,21 @@ index 00000000..8c468855
 +	}
 +
 +	private async performClose(record: ViewRecord): Promise<ManagedViewRuntimeClose> {
++		try {
++			await this.waitForPendingResources(record);
++		} catch (error) {
++			const message = `pending managed resources did not settle: ${error instanceof Error ? error.message : 'unknown error'}`;
++			record.state = 'CLEANUP_FAILED';
++			record.failures = [message];
++			this._logService.error(`[ManagedView] close failed ${record.viewId}: ${message}`);
++			return {
++				state: 'CLEANUP_FAILED',
++				failures: [message],
++				releasedManagementConnections: 0,
++				releasedExtensionHosts: 0,
++				releasedTerminals: 0
++			};
++		}
 +		const management = [...record.management];
 +		const extensionHosts = [...record.extensionHosts];
 +		const terminals = [...record.terminals.values()];
@@ -626,6 +827,10 @@ index 00000000..8c468855
 +			if (outcomes[management.length + extensionHosts.length + i].status === 'fulfilled') {
 +				record.terminals.delete(terminals[i].id);
 +			}
++		}
++		if (failures.length === 0 && record.terminals.size > 0) {
++			const late = [...record.terminals.keys()].join(', ');
++			failures.push(`terminal created while the view was closing: ${late}`);
 +		}
 +
 +		const result: ManagedViewRuntimeClose = failures.length === 0
@@ -927,7 +1132,7 @@ index 4a38e83e..8b79d7ad 100644
  
  	public acceptReconnection(remoteAddress: string, socket: ISocket, initialDataChunk: VSBuffer): void {
 diff --git a/lib/vscode/src/vs/server/node/remoteTerminalChannel.ts b/lib/vscode/src/vs/server/node/remoteTerminalChannel.ts
-index f2bbe6a4..11ac3515 100644
+index f2bbe6a4..bee79a44 100644
 --- a/lib/vscode/src/vs/server/node/remoteTerminalChannel.ts
 +++ b/lib/vscode/src/vs/server/node/remoteTerminalChannel.ts
 @@ -27,6 +27,7 @@ import { ICreateTerminalProcessArguments, ICreateTerminalProcessResult, IWorkspa
@@ -957,22 +1162,30 @@ index f2bbe6a4..11ac3515 100644
  			}
  			case RemoteTerminalChannelRequest.AttachToProcess: return this._ptyHostService.attachToProcess.apply(this._ptyHostService, args);
  			case RemoteTerminalChannelRequest.DetachFromProcess: return this._ptyHostService.detachFromProcess.apply(this._ptyHostService, args);
-@@ -151,7 +153,13 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
+@@ -151,7 +153,21 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
  			case RemoteTerminalChannelRequest.SetTerminalLayoutInfo: return this._ptyHostService.setTerminalLayoutInfo(<ISetTerminalLayoutInfoArgs>args);
  			case RemoteTerminalChannelRequest.SerializeTerminalState: return this._ptyHostService.serializeTerminalState.apply(this._ptyHostService, args);
  			case RemoteTerminalChannelRequest.ReviveTerminalProcesses: return this._ptyHostService.reviveTerminalProcesses.apply(this._ptyHostService, args);
 -			case RemoteTerminalChannelRequest.GetRevivedPtyNewId: return this._ptyHostService.getRevivedPtyNewId.apply(this._ptyHostService, args);
 +			case RemoteTerminalChannelRequest.GetRevivedPtyNewId: {
-+				const revivedId = await this._ptyHostService.getRevivedPtyNewId(args[0], args[1]);
-+				if (typeof revivedId === 'number') {
-+					this._trackTerminal(ctx, revivedId);
++				const view = this._managedView(ctx);
++				const reserved = view !== undefined && this._managedViews.beginTerminalCreate(view.viewId, view.bindingEpoch);
++				try {
++					const revivedId = await this._ptyHostService.getRevivedPtyNewId(args[0], args[1]);
++					if (typeof revivedId === 'number') {
++						await this._trackTerminal(ctx, revivedId);
++					}
++					return revivedId;
++				} finally {
++					if (reserved && view) {
++						this._managedViews.endTerminalCreate(view.viewId, view.bindingEpoch);
++					}
 +				}
-+				return revivedId;
 +			}
  			case RemoteTerminalChannelRequest.SetUnicodeVersion: return this._ptyHostService.setUnicodeVersion.apply(this._ptyHostService, args);
  			case RemoteTerminalChannelRequest.SetNextCommandId: return this._ptyHostService.setNextCommandId.apply(this._ptyHostService, args);
  			case RemoteTerminalChannelRequest.ReduceConnectionGraceTime: return this._reduceConnectionGraceTime();
-@@ -190,7 +198,29 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
+@@ -190,7 +206,44 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
  		throw new Error(`IPC Command ${event} not found`);
  	}
  
@@ -986,33 +1199,48 @@ index f2bbe6a4..11ac3515 100644
 +		return { viewId, bindingEpoch };
 +	}
 +
-+	private _trackTerminal(ctx: RemoteAgentConnectionContext, id: number): void {
++	private async _trackTerminal(ctx: RemoteAgentConnectionContext, id: number): Promise<void> {
 +		const view = this._managedView(ctx);
 +		if (!view) {
 +			return;
 +		}
 +		if (!this._managedViews.attachTerminal(view.viewId, view.bindingEpoch, id)) {
-+			// The view entered CLOSING between create and ownership registration. Never leave
-+			// an untracked shell behind.
-+			void this._ptyHostService.shutdown(id, true);
++			// The view entered CLOSING between create and ownership registration. The
++			// tracker retains the handle; wait for shutdown so the close/retry sees the
++			// actual process exit instead of an untracked shell.
++			await this._ptyHostService.shutdown(id, true);
 +			throw new Error('managed view is closing; terminal was not accepted');
 +		}
 +	}
 +
 +	private async _createProcess(ctx: RemoteAgentConnectionContext, uriTransformer: IURITransformer, args: ICreateTerminalProcessArguments): Promise<ICreateTerminalProcessResult> {
++		const view = this._managedView(ctx);
++		if (view && !this._managedViews.beginTerminalCreate(view.viewId, view.bindingEpoch)) {
++			throw new Error('managed view is closing; terminal was not created');
++		}
++		try {
++			return await this._createProcessReserved(ctx, uriTransformer, args);
++		} finally {
++			if (view) {
++				this._managedViews.endTerminalCreate(view.viewId, view.bindingEpoch);
++			}
++		}
++	}
++
++	private async _createProcessReserved(ctx: RemoteAgentConnectionContext, uriTransformer: IURITransformer, args: ICreateTerminalProcessArguments): Promise<ICreateTerminalProcessResult> {
  		const shellLaunchConfig: IShellLaunchConfig = {
  			name: args.shellLaunchConfig.name,
  			executable: args.shellLaunchConfig.executable,
-@@ -268,6 +298,7 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
+@@ -268,6 +321,7 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
  		env.VSCODE_IPC_HOOK_CLI = ipcHandlePath;
  
  		const persistentProcessId = await this._ptyHostService.createProcess(shellLaunchConfig, initialCwd, args.cols, args.rows, args.unicodeVersion, env, baseEnv, args.options, args.shouldPersistTerminal, args.workspaceId, args.workspaceName);
-+		this._trackTerminal(ctx, persistentProcessId);
++		await this._trackTerminal(ctx, persistentProcessId);
  		const commandsExecuter: ICommandsExecuter = {
  			executeCommand: <T>(id: string, ...args: unknown[]): Promise<T> => this._executeCommand(persistentProcessId, id, args, uriTransformer)
  		};
 diff --git a/lib/vscode/src/vs/server/node/serverServices.ts b/lib/vscode/src/vs/server/node/serverServices.ts
-index b5930d53..fd1f63a8 100644
+index b5930d53..a4575489 100644
 --- a/lib/vscode/src/vs/server/node/serverServices.ts
 +++ b/lib/vscode/src/vs/server/node/serverServices.ts
 @@ -111,6 +111,7 @@ import type { ILifecycleMainService } from '../../platform/lifecycle/electron-ma
@@ -1057,7 +1285,7 @@ index b5930d53..fd1f63a8 100644
  }
  
  const _uriTransformerCache: { [remoteAuthority: string]: IURITransformer } = Object.create(null);
-@@ -466,14 +469,22 @@ function getUriTransformer(remoteAuthority: string): IURITransformer {
+@@ -466,14 +469,20 @@ function getUriTransformer(remoteAuthority: string): IURITransformer {
  export class SocketServer<TContext = string> extends IPCServer<TContext> {
  
  	private _onDidConnectEmitter: Emitter<ClientConnectionEvent>;
@@ -1067,18 +1295,16 @@ index b5930d53..fd1f63a8 100644
  		const emitter = new Emitter<ClientConnectionEvent>();
 -		super(emitter.event);
 +		super(emitter.event, undefined, undefined, (protocol) => {
-+			const context = this._connectionContexts.get(protocol);
-+			this._connectionContexts.delete(protocol);
-+			return context;
++			// Keep the server-verified context for the lifetime of the protocol so a
++			// reconnection cannot inject identity fields through its first IPC message.
++			return this._connectionContexts.get(protocol);
 +		});
  		this._onDidConnectEmitter = emitter;
  	}
  
 -	public acceptConnection(protocol: IMessagePassingProtocol, onDidClientDisconnect: Event<void>): void {
-+	public acceptConnection(protocol: IMessagePassingProtocol, onDidClientDisconnect: Event<void>, context?: Partial<TContext>): void {
-+		if (context) {
-+			this._connectionContexts.set(protocol, context);
-+		}
++	public acceptConnection(protocol: IMessagePassingProtocol, onDidClientDisconnect: Event<void>, context: Partial<TContext>): void {
++		this._connectionContexts.set(protocol, context);
  		this._onDidConnectEmitter.fire({ protocol, onDidClientDisconnect });
  	}
  }

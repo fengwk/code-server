@@ -42,7 +42,11 @@ class FakeRuntime implements ManagedViewRuntime {
   readonly records = new Map<string, ManagedViewRuntimeInspection>()
   failClose = false
   failRebind = false
-  async registerView(viewId: string, bindingEpoch: string, workspacePath: string): Promise<ManagedViewRuntimeRegistration> {
+  async registerView(
+    viewId: string,
+    bindingEpoch: string,
+    workspacePath: string,
+  ): Promise<ManagedViewRuntimeRegistration> {
     this.registrations.push(`${viewId}:${bindingEpoch}`)
     if (!this.records.has(viewId)) {
       this.records.set(viewId, {
@@ -106,10 +110,22 @@ class FakeRuntime implements ManagedViewRuntime {
   async closeView(viewId: string): Promise<ManagedViewRuntimeClose> {
     this.closes.push(viewId)
     if (this.failClose) {
-      return { state: "CLEANUP_FAILED", failures: ["extension host did not exit"], releasedManagementConnections: 0, releasedExtensionHosts: 0, releasedTerminals: 0 }
+      return {
+        state: "CLEANUP_FAILED",
+        failures: ["extension host did not exit"],
+        releasedManagementConnections: 0,
+        releasedExtensionHosts: 0,
+        releasedTerminals: 0,
+      }
     }
     this.records.delete(viewId)
-    return { state: "CLOSED", failures: [], releasedManagementConnections: 1, releasedExtensionHosts: 1, releasedTerminals: 1 }
+    return {
+      state: "CLOSED",
+      failures: [],
+      releasedManagementConnections: 1,
+      releasedExtensionHosts: 1,
+      releasedTerminals: 1,
+    }
   }
   async listViews(): Promise<ManagedViewRuntimeInspection[]> {
     return [...this.records.values()]
@@ -178,8 +194,12 @@ describe("managed view lifecycle", () => {
     expect(first.state).toBe("OPEN")
     expect(second.state).toBe("OPEN")
     expect(runtime.registrations).toEqual([`${VIEW_A}:2`])
-    await expect(manager.register(VIEW_A, "1", workspaceA, runtime)).rejects.toMatchObject({ code: "VIEW_EPOCH_ROLLBACK" })
-    await expect(manager.register(VIEW_A, "2", workspaceB, runtime)).rejects.toMatchObject({ code: "VIEW_BINDING_CONFLICT" })
+    await expect(manager.register(VIEW_A, "1", workspaceA, runtime)).rejects.toMatchObject({
+      code: "VIEW_EPOCH_ROLLBACK",
+    })
+    await expect(manager.register(VIEW_A, "2", workspaceB, runtime)).rejects.toMatchObject({
+      code: "VIEW_BINDING_CONFLICT",
+    })
   })
 
   test("a higher epoch rebinds the same view and preserves terminals", async () => {
@@ -199,7 +219,7 @@ describe("managed view lifecycle", () => {
     await expect(manager.inspect(VIEW_A, "1", runtime)).rejects.toMatchObject({ code: "VIEW_EPOCH_MISMATCH" })
   })
 
-  test("rebind cleanup failure keeps CLEANUP_FAILED and rejects new bindings", async () => {
+  test("rebind cleanup failure keeps CLEANUP_FAILED and can be retried", async () => {
     await manager.register(VIEW_A, "1", workspaceA, runtime)
     runtime.failRebind = true
     const http = new FakeResource()
@@ -209,9 +229,29 @@ describe("managed view lifecycle", () => {
       code: "REBIND_CLEANUP_FAILED",
     })
     expect((await manager.inspect(VIEW_A, "1", runtime)).state).toBe("CLEANUP_FAILED")
-    await expect(manager.register(VIEW_A, "3", workspaceA, runtime)).rejects.toMatchObject({
-      code: "VIEW_CLEANUP_INCOMPLETE",
+
+    runtime.failRebind = false
+    const retried = await manager.register(VIEW_A, "2", workspaceA, runtime)
+    expect(retried.state).toBe("OPEN")
+    expect(retried.bindingEpoch).toBe("2")
+    expect(manager.isOpen(VIEW_A, "2")).toBe(true)
+    expect(runtime.rebinds).toEqual([`${VIEW_A}:1->2`, `${VIEW_A}:1->2`])
+  })
+
+  test("a local rebind cleanup failure can be retried after the resource exits", async () => {
+    await manager.register(VIEW_A, "1", workspaceA, runtime)
+    const resource = new FakeResource(false)
+    expect(manager.trackHttp(VIEW_A, "1", resource)).toBe(true)
+
+    await expect(manager.register(VIEW_A, "2", workspaceA, runtime)).rejects.toMatchObject({
+      code: "REBIND_CLEANUP_FAILED",
     })
+    expect((await manager.inspect(VIEW_A, "1", runtime)).state).toBe("CLEANUP_FAILED")
+
+    resource.emit("close")
+    const retried = await manager.register(VIEW_A, "2", workspaceA, runtime)
+    expect(retried.state).toBe("OPEN")
+    expect(retried.bindingEpoch).toBe("2")
   })
 
   test("inspect exposes resource facts and never claims a clean draft state", async () => {
@@ -293,7 +333,9 @@ describe("managed view lifecycle", () => {
   test("a closed view cannot be reopened at the same or an older epoch", async () => {
     await manager.register(VIEW_A, "2", workspaceA, runtime)
     await manager.close(VIEW_A, "2", "expired", runtime)
-    await expect(manager.register(VIEW_A, "1", workspaceA, runtime)).rejects.toMatchObject({ code: "VIEW_EPOCH_ROLLBACK" })
+    await expect(manager.register(VIEW_A, "1", workspaceA, runtime)).rejects.toMatchObject({
+      code: "VIEW_EPOCH_ROLLBACK",
+    })
     const same = await manager.register(VIEW_A, "2", workspaceA, runtime)
     expect(same.state).toBe("CLOSED")
     const next = await manager.register(VIEW_A, "3", workspaceA, runtime)
@@ -311,7 +353,9 @@ describe("managed view lifecycle", () => {
     await fs.writeFile(workspaceFile, "{}")
     await expect(canonicalWorkspacePath(workspaceA)).resolves.toBe(workspaceA)
     await expect(canonicalWorkspacePath(workspaceFile)).resolves.toBe(workspaceFile)
-    await expect(canonicalWorkspacePath(path.join(root, "missing"))).rejects.toMatchObject({ code: "WORKSPACE_NOT_FOUND" })
+    await expect(canonicalWorkspacePath(path.join(root, "missing"))).rejects.toMatchObject({
+      code: "WORKSPACE_NOT_FOUND",
+    })
     const plainFile = path.join(root, "plain.txt")
     await fs.writeFile(plainFile, "x")
     await expect(canonicalWorkspacePath(plainFile)).rejects.toMatchObject({ code: "INVALID_WORKSPACE_PATH" })

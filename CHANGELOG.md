@@ -20,6 +20,26 @@ Code v99.99.999
 
 -->
 
+## [4.141.0-kk.2] - 2026-10-28
+
+Code v1.141.0
+
+### Added
+
+- Managed views with a loopback-token lifecycle API. Views are addressed by a
+  fixed view/epoch path, bind a workspace and session scope, and expose
+  server-verified identity only after the view router authenticates it.
+- Higher-epoch rebind closes the previous management connection and extension
+  host while retaining the view's terminals and leaving other views untouched.
+- Real exit evidence for extension hosts and terminals. Cleanup failures remain
+  retryable and are never reported as `CLOSED`.
+
+### Security
+
+- Management requests are restricted to loopback peers with a constant-time
+  token check. Browser-supplied managed-view identity headers are stripped
+  before they reach VS Code.
+
 ## Unreleased
 
 Code v1.141.0

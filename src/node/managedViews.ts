@@ -1,7 +1,7 @@
 import { logger } from "@coder/logger"
+import * as crypto from "crypto"
 import { promises as fs } from "fs"
 import * as path from "path"
-import * as crypto from "crypto"
 
 /**
  * Local management contract for code-server views.
@@ -92,11 +92,7 @@ export interface ManagedViewRuntime {
     workspacePath: string,
   ): Promise<ManagedViewRuntimeRebind>
   inspectView(viewId: string, bindingEpoch: string): Promise<ManagedViewRuntimeInspection>
-  closeView(
-    viewId: string,
-    bindingEpoch: string,
-    mode: ManagedViewMode,
-  ): Promise<ManagedViewRuntimeClose>
+  closeView(viewId: string, bindingEpoch: string, mode: ManagedViewMode): Promise<ManagedViewRuntimeClose>
   listViews(): Promise<ManagedViewRuntimeInspection[]>
 }
 
@@ -233,7 +229,11 @@ export function parseRegisterBody(body: unknown): { bindingEpoch: string; worksp
   const object = requireObject(body)
   requireExactKeys(object, ["bindingEpoch", "workspacePath"])
   const bindingEpoch = normalizeBindingEpoch(object.bindingEpoch)
-  if (typeof object.workspacePath !== "string" || object.workspacePath.length === 0 || object.workspacePath.length > 4096) {
+  if (
+    typeof object.workspacePath !== "string" ||
+    object.workspacePath.length === 0 ||
+    object.workspacePath.length > 4096
+  ) {
     throw new ManagedViewError(400, "INVALID_WORKSPACE_PATH", "workspacePath must be a non-empty absolute path")
   }
   if (!path.isAbsolute(object.workspacePath) || object.workspacePath.includes("\0")) {
@@ -282,7 +282,11 @@ export async function canonicalWorkspacePath(value: string): Promise<string> {
   if (stat.isFile() && path.extname(resolved) === ".code-workspace") {
     return resolved
   }
-  throw new ManagedViewError(400, "INVALID_WORKSPACE_PATH", "workspacePath must be a directory or a .code-workspace file")
+  throw new ManagedViewError(
+    400,
+    "INVALID_WORKSPACE_PATH",
+    "workspacePath must be a directory or a .code-workspace file",
+  )
 }
 
 function draftBackup() {
@@ -384,17 +388,25 @@ export class ManagedViewManager {
     return this.active.has(viewId) || this.closed.has(viewId)
   }
 
-  trackHttp(viewId: string, bindingEpoch: string, res: {
-    once(event: "close", listener: () => void): unknown
-    destroy(): void
-  }): boolean {
+  trackHttp(
+    viewId: string,
+    bindingEpoch: string,
+    res: {
+      once(event: "close", listener: () => void): unknown
+      destroy(): void
+    },
+  ): boolean {
     return this.track(viewId, bindingEpoch, "http", res)
   }
 
-  trackWebSocket(viewId: string, bindingEpoch: string, socket: {
-    once(event: "close", listener: () => void): unknown
-    destroy(): void
-  }): boolean {
+  trackWebSocket(
+    viewId: string,
+    bindingEpoch: string,
+    socket: {
+      once(event: "close", listener: () => void): unknown
+      destroy(): void
+    },
+  ): boolean {
     return this.track(viewId, bindingEpoch, "websockets", socket)
   }
 
@@ -438,13 +450,9 @@ export class ManagedViewManager {
         if (BigInt(bindingEpoch) < BigInt(existing.bindingEpoch)) {
           throw new ManagedViewError(409, "VIEW_EPOCH_ROLLBACK", "bindingEpoch cannot move backwards")
         }
-        if (existing.state !== "OPEN") {
-          throw new ManagedViewError(
-            409,
-            "VIEW_CLEANUP_INCOMPLETE",
-            "view has not completed its previous close or rebind cleanup",
-          )
-        }
+        // A failed rebind keeps the old epoch and remaining handles. Retrying
+        // with a higher epoch converges that cleanup instead of leaking the
+        // view or pretending the new binding already exists.
         return this.rebind(existing, bindingEpoch, runtime)
       }
       const closed = this.closed.get(viewId)
@@ -489,7 +497,11 @@ export class ManagedViewManager {
     })
   }
 
-  private async rebind(view: ActiveView, bindingEpoch: string, runtime: ManagedViewRuntime): Promise<ManagedViewInspection> {
+  private async rebind(
+    view: ActiveView,
+    bindingEpoch: string,
+    runtime: ManagedViewRuntime,
+  ): Promise<ManagedViewInspection> {
     view.state = "CLOSING"
     view.updatedAt = new Date().toISOString()
     const http = [...view.http]
@@ -541,7 +553,11 @@ export class ManagedViewManager {
     return this.inspectActive(view, runtime)
   }
 
-  inspect(viewIdInput: unknown, bindingEpochInput: unknown, runtime: ManagedViewRuntime): Promise<ManagedViewInspection> {
+  inspect(
+    viewIdInput: unknown,
+    bindingEpochInput: unknown,
+    runtime: ManagedViewRuntime,
+  ): Promise<ManagedViewInspection> {
     const viewId = normalizeViewId(viewIdInput)
     const bindingEpoch = normalizeBindingEpoch(bindingEpochInput)
     return this.withLock(viewId, async () => {
@@ -672,7 +688,11 @@ export class ManagedViewManager {
     }
   }
 
-  private async performClose(view: ActiveView, mode: ManagedViewMode, runtime: ManagedViewRuntime): Promise<ManagedViewCloseResult> {
+  private async performClose(
+    view: ActiveView,
+    mode: ManagedViewMode,
+    runtime: ManagedViewRuntime,
+  ): Promise<ManagedViewCloseResult> {
     const localHttp = [...view.http]
     const localWebSockets = [...view.websockets]
     const local = await Promise.allSettled([
@@ -717,14 +737,19 @@ export class ManagedViewManager {
     const complete = failures.length === 0 && runtimeResult.state === "CLOSED"
     if (!complete) {
       view.state = "CLEANUP_FAILED"
-      const failed = this.closeResult(view, mode, {
-        complete: false,
-        httpReleased,
-        websocketsReleased,
-        managementConnectionsReleased: runtimeResult.releasedManagementConnections,
-        extensionHostsReleased: runtimeResult.releasedExtensionHosts,
-        terminalsReleased: runtimeResult.releasedTerminals,
-      }, failures)
+      const failed = this.closeResult(
+        view,
+        mode,
+        {
+          complete: false,
+          httpReleased,
+          websocketsReleased,
+          managementConnectionsReleased: runtimeResult.releasedManagementConnections,
+          extensionHostsReleased: runtimeResult.releasedExtensionHosts,
+          terminalsReleased: runtimeResult.releasedTerminals,
+        },
+        failures,
+      )
       return failed
     }
 
@@ -791,6 +816,7 @@ export class ManagedViewManager {
 
 /** Emit one bounded diagnostic line without request bodies, headers or tokens. */
 export function logManagedViewError(error: unknown): void {
-  const message = error instanceof ManagedViewError ? `${error.code}: ${error.message}` : "unexpected management failure"
+  const message =
+    error instanceof ManagedViewError ? `${error.code}: ${error.message}` : "unexpected management failure"
   logger.warn(`managed views: ${message}`)
 }

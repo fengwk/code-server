@@ -1,8 +1,8 @@
 import * as fs from "fs"
-import * as path from "path"
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 import { fileURLToPath } from "node:url"
+import * as path from "path"
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 
@@ -17,6 +17,42 @@ describe("managed release", () => {
     assert.doesNotMatch(workflow, /NPM_TOKEN|npm publish|id-token:|docker|nfpm|goreleaser|release-gcp/i)
     assert.ok(workflow.includes("contents: write"))
     assert.ok(workflow.includes("inputs.publish"))
+  })
+
+  // The candidate version is fixed in one place: dispatch and tag publishes
+  // must agree, and the source metadata keeps the upstream Code tag separate.
+  it("targets the 4.141.0-kk.2 candidate consistently", () => {
+    assert.equal(workflow.match(/4\.141\.0-kk\.2/g)?.length, 2)
+    assert.doesNotMatch(workflow, /4\.141\.0-kk\.1/)
+    assert.ok(workflow.includes('--arg upstreamTag "v4.141.0"'))
+    assert.ok(workflow.includes("tag=v4.141.0-kk.2"))
+  })
+
+  // A managed-view patch that misses a VS Code file leaves the built server
+  // without the runtime contract, so keep the series and patch inventory
+  // explicit.
+  it("ships every managed-view VS Code change through the patch series", () => {
+    const series = fs
+      .readFileSync(path.join(root, "patches/series"), "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0)
+    assert.equal(series.filter((line) => line === "managed-views.diff").length, 1)
+    assert.ok(series.indexOf("managed-views.diff") > series.indexOf("managed-runtime.diff"))
+    const patch = fs.readFileSync(path.join(root, "patches/managed-views.diff"), "utf8")
+    for (const file of [
+      "src/vs/base/parts/ipc/common/ipc.ts",
+      "src/vs/platform/remote/common/remoteAgentConnection.ts",
+      "src/vs/platform/remote/common/remoteAgentEnvironment.ts",
+      "src/vs/server/node/extensionHostConnection.ts",
+      "src/vs/server/node/managedViews.ts",
+      "src/vs/server/node/remoteExtensionHostAgentServer.ts",
+      "src/vs/server/node/remoteExtensionManagement.ts",
+      "src/vs/server/node/remoteTerminalChannel.ts",
+      "src/vs/server/node/serverServices.ts",
+      "src/vs/server/node/webClientServer.ts",
+    ]) {
+      assert.ok(patch.includes(`diff --git a/lib/vscode/${file} b/lib/vscode/${file}`), file)
+    }
   })
 
   // Asset names and provenance are fixed by the product contract, not derived
@@ -47,8 +83,8 @@ describe("managed release", () => {
   // Source downloads need authenticated API access; package jobs never need
   // release write permissions or an x86_64 compiler on their ARM64 host.
   it("uses read-only authenticated source downloads and host-compatible ARM64 compilers", () => {
-    assert.match(workflow, /permissions:\n  contents: read/)
-    assert.match(workflow, /name: Build from source\n        env:\n          GITHUB_TOKEN: \$\{\{ github.token \}\}/)
+    assert.match(workflow, /permissions:\n {2}contents: read/)
+    assert.match(workflow, /name: Build from source\n {8}env:\n {10}GITHUB_TOKEN: \$\{\{ github.token \}\}/)
     assert.ok(workflow.includes("::add-mask::"))
     assert.ok(workflow.includes('if [[ "$OS" == linux && "$ARCH" == amd64 ]]'))
     assert.ok(workflow.includes("export CC=gcc CXX=g++"))
@@ -58,7 +94,11 @@ describe("managed release", () => {
   // The browser runner resolves --run against the selected build output and
   // can otherwise exit successfully without executing a single test.
   it("runs the built workspace snapshot suite and rejects missing or skipped cases", () => {
-    assert.ok(workflow.includes("--run out-build/vs/workbench/services/configuration/test/browser/configurationService.test.js"))
+    assert.ok(
+      workflow.includes(
+        "--run out-build/vs/workbench/services/configuration/test/browser/configurationService.test.js",
+      ),
+    )
     assert.ok(workflow.includes("--reporter full-json-stream"))
     assert.ok(workflow.includes("stats.tests >= 5"))
     assert.ok(workflow.includes("assert.equal(stats.passes, stats.tests)"))
@@ -72,7 +112,7 @@ describe("managed release", () => {
     assert.ok(workflow.includes('requireServer("@vscode/ripgrep-universal")'))
     assert.ok(workflow.includes('spawnSync(rgPath, ["--version"]'))
     assert.doesNotMatch(workflow, /"@vscode", "ripgrep", "bin"/)
-    assert.ok(workflow.includes('MSYS_NO_PATHCONV=1 cmd.exe /c'))
+    assert.ok(workflow.includes("MSYS_NO_PATHCONV=1 cmd.exe /c"))
     assert.ok(workflow.includes("test -x /c/msys64/usr/bin/rsync.exe"))
   })
 
@@ -80,7 +120,7 @@ describe("managed release", () => {
   // Darwin builds Kerberos against its system libraries rather than Linux RTLD names.
   it("supplies native verification dependencies without skipping addon loads", () => {
     assert.match(workflow, /sudo apt-get install -y .*libwebkit2gtk-4\.1-0/)
-    assert.match(workflow, /name: Install macOS build dependencies\n        if: matrix\.os == 'macos'\n        run: \|/)
+    assert.match(workflow, /name: Install macOS build dependencies\n {8}if: matrix\.os == 'macos'\n {8}run: \|/)
     assert.ok(workflow.includes('echo "GYP_DEFINES=kerberos_use_rtld=false" >> "$GITHUB_ENV"'))
     assert.ok(workflow.includes("for (const native of natives)"))
     assert.ok(workflow.includes("if (loaded.status !== 0) throw new Error"))
@@ -92,8 +132,8 @@ describe("managed release", () => {
     assert.ok(workflow.includes('if (process.platform !== "win32")'))
     assert.ok(workflow.includes('"@vscode", "deviceid", "build", "Release", "windows.node"'))
     assert.ok(workflow.includes('requireServer("@vscode/deviceid").getDeviceId'))
-    assert.ok(workflow.includes('for (const native of natives)'))
-    assert.ok(workflow.includes('if (loaded.status !== 0) throw new Error'))
+    assert.ok(workflow.includes("for (const native of natives)"))
+    assert.ok(workflow.includes("if (loaded.status !== 0) throw new Error"))
   })
 
   // The release archive and checksum remain the only distribution format.
@@ -116,7 +156,7 @@ describe("copilot source exclusion", () => {
   const reh = fs
     .readFileSync(path.join(root, "patches/managed-runtime.diff"), "utf8")
     .split("\n")
-    .filter(line => line.startsWith("+") && !line.startsWith("+++"))
+    .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
     .join("\n")
 
   // Removing the extension after packaging is not sufficient: the dedicated

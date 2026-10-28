@@ -86,7 +86,7 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             version=${GITHUB_REF_NAME#v}
           else
-            version=4.141.0-kk.1
+            version=4.141.0-kk.2
           fi
           case "$version" in
             *-kk.*) ;;
@@ -324,7 +324,7 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             tag=$GITHUB_REF_NAME
           else
-            tag=v4.141.0-kk.1
+            tag=v4.141.0-kk.2
           fi
           version=${tag#v}
           repo=$GITHUB_REPOSITORY

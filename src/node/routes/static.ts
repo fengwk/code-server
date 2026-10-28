@@ -12,9 +12,11 @@ export const createStaticHandler = (): express.RequestHandler =>
     fallthrough: false,
     setHeaders: (res, filePath) => {
       // The service worker is served from a sub-path on the static route so this
-      // is required to allow it to register a higher scope.
+      // is required to allow it to register a higher scope. The scope must stay
+      // below the current mount (the view base for managed views).
       if (filePath.endsWith("/serviceWorker.js")) {
-        res.setHeader("Service-Worker-Allowed", "/")
+        const base = res.req.baseUrl.replace(/\/_static$/, "")
+        res.setHeader("Service-Worker-Allowed", `${base}/`)
       }
     },
   })
