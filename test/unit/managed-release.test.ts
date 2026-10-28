@@ -1,4 +1,5 @@
 import * as fs from "fs"
+import yaml from "js-yaml"
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 import { fileURLToPath } from "node:url"
@@ -105,6 +106,49 @@ describe("managed release", () => {
     assert.ok(workflow.includes("assert.equal(stats.passes, stats.tests)"))
     assert.ok(workflow.includes("assert.equal(stats.failures, 0)"))
     assert.ok(workflow.includes("assert.equal(stats.pending, 0)"))
+  })
+
+  // The real-child regression runs on every native build; Linux also exercises
+  // both browser suites against that build's release, without retries.
+  it("gates all native builds on managed-view node tests and Linux on both browser suites", () => {
+    const parsed = yaml.load(workflow) as {
+      jobs: {
+        package: {
+          strategy: { matrix: { include: { asset: string }[] } }
+          steps: { name?: string; if?: string; run?: string }[]
+        }
+      }
+    }
+    const job = parsed.jobs.package
+    assert.deepEqual(
+      job.strategy.matrix.include.map(({ asset }) => asset),
+      ["linux-amd64", "linux-arm64", "windows-amd64", "macos-amd64", "macos-arm64"],
+    )
+    const build = job.steps.find(({ name }) => name === "Build from source")!
+    assert.equal(build.if, undefined)
+    const commands = build.run!.split("\n").map((line) => line.trim())
+    const core = commands.indexOf("npm run gulp core-ci")
+    assert.ok(core >= 0)
+    assert.equal(
+      commands[core + 1],
+      "node test/unit/node/index.js --build --run out-build/vs/server/test/node/managedViews.test.ts --timeout 30000",
+    )
+    const smoke = job.steps.find(({ name }) => name === "Smoke two workspaces in one server")!
+    assert.equal(smoke.if, "matrix.asset == 'linux-amd64'")
+    const e2e = smoke.run!.split("\n").find((line) => line.includes("npm run test:e2e"))!
+    assert.deepEqual(e2e.trim().split(/\s+/), [
+      'CODE_SERVER_TEST_ENTRY="$PWD/release"',
+      "npm",
+      "run",
+      "test:e2e",
+      "--",
+      "--project",
+      "Chromium",
+      "--retries",
+      "0",
+      "e2e/managed-workspaces.test.ts",
+      "e2e/managed-views.test.ts",
+    ])
   })
 
   // Search uses the universal package API, not the build-only ripgrep layout.

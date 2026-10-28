@@ -197,6 +197,7 @@ jobs:
           node --experimental-strip-types --test test/unit/managed-release.test.ts
           cd lib/vscode
           npm run gulp core-ci
+          node test/unit/node/index.js --build --run out-build/vs/server/test/node/managedViews.test.ts --timeout 30000
           if [[ "$OS" == linux ]]; then
             ./node_modules/.bin/playwright install --with-deps chromium
             npm run test-browser-no-install -- --build --browser chromium \
@@ -294,7 +295,7 @@ jobs:
           set -euo pipefail
           npm --prefix test ci
           ./test/node_modules/.bin/playwright install --with-deps chromium
-          CODE_SERVER_TEST_ENTRY="$PWD/release" npm run test:e2e -- --project Chromium --retries 0 e2e/managed-workspaces.test.ts
+          CODE_SERVER_TEST_ENTRY="$PWD/release" npm run test:e2e -- --project Chromium --retries 0 e2e/managed-workspaces.test.ts e2e/managed-views.test.ts
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
