@@ -63,10 +63,15 @@ messages.
 - **Terminal creation races:** terminal creation is reserved before the shell is
   spawned. A close/rebind waits for admitted creations to settle, and a terminal
   that arrives after the view starts closing is tracked and shut down instead of
-  becoming an untracked shell.
+  becoming an untracked shell. A request that revives a terminal for a view that
+  stopped accepting terminals is rejected before the PTY host is asked for an id,
+  so no untracked shell is created.
 - **Extension-host startup races:** extension-host starts are also reserved, so
   a close/rebind cannot return before a child that was already starting has
-  actually exited.
+  actually exited. When the view refuses to register the extension host, the
+  exact child that was forked is terminated and its exit is awaited before the
+  pending start is released, so the extension host cannot outlive the view that
+  rejected it.
 - **`normal` close:** rejected with `409 DRAFT_STATE_UNKNOWN`. code-server
   cannot observe renderer-only unsaved buffers, so it never claims that a
   workspace is clean. The daemon bridge performs its own dirty check and calls
@@ -99,6 +104,16 @@ KEEP_MODULES=1 npm run release
 npm --prefix test ci
 CODE_SERVER_TEST_ENTRY="$PWD/release" npm run test:e2e -- \
   --project Chromium --retries 0 e2e/managed-views.test.ts
+```
+
+The embedded tracker and the extension-host and terminal races are covered by the
+VS Code node test:
+
+```bash
+cd lib/vscode
+node build/next/index.ts transpile --out out-build
+node test/unit/node/index.js --build \
+  --run out-build/vs/server/test/node/managedViews.test.ts
 ```
 
 The focused real-browser test opens two workspaces in one server, creates a

@@ -70,7 +70,7 @@ index e63de4e5..9a633ca0 100644
 +	bindingEpoch?: string;
  }
 diff --git a/lib/vscode/src/vs/server/node/extensionHostConnection.ts b/lib/vscode/src/vs/server/node/extensionHostConnection.ts
-index 06d614be..81803aa0 100644
+index 06d614be..7c7d76c1 100644
 --- a/lib/vscode/src/vs/server/node/extensionHostConnection.ts
 +++ b/lib/vscode/src/vs/server/node/extensionHostConnection.ts
 @@ -22,6 +22,7 @@ import { getNLSConfiguration } from './remoteLanguagePacks.js';
@@ -225,7 +225,7 @@ index 06d614be..81803aa0 100644
  			// Run Extension Host as fork of current process
  			const args = ['--type=extensionHost', `--transformURIs`];
  			const useHostProxy = this._environmentService.args['use-host-proxy'];
-@@ -289,8 +387,30 @@ export class ExtensionHostConnection extends Disposable {
+@@ -289,8 +387,25 @@ export class ExtensionHostConnection extends Disposable {
  			}
  			this._extensionHostProcess = cp.fork(FileAccess.asFileUri('bootstrap-fork').fsPath, args, opts);
  			const pid = this._extensionHostProcess.pid;
@@ -237,18 +237,13 @@ index 06d614be..81803aa0 100644
 +					this._log(`Managed view closed before the extension host could be registered; terminating it.`);
 +					const extensionHostProcess = this._extensionHostProcess;
 +					this._extensionHostProcess = null;
-+					if (this._disposed || this._managedTerminating) {
-+						if (extensionHostProcess) {
-+							await this._terminateExtensionHostProcess(extensionHostProcess);
-+						} else {
-+							this._detachManagedView();
-+						}
-+					} else {
-+						this._cleanResources();
-+						if (this._managedExit) {
-+							await this._managedExit;
-+						}
-+					}
++					// The forked child belongs to this connection even when the view
++					// refused the registration. Terminate that exact child process and
++					// wait for its actual exit before the pending start is released.
++					// A PID-only kill could hit an unrelated process and the extension
++					// host would otherwise outlive the view that rejected it.
++					this._cleanResources();
++					await this._terminateExtensionHostProcess(extensionHostProcess);
 +					return;
 +				}
 +			}
@@ -256,7 +251,7 @@ index 06d614be..81803aa0 100644
  			// Catch all output coming from the extension host process
  			this._extensionHostProcess.stdout!.setEncoding('utf8');
  			this._extensionHostProcess.stderr!.setEncoding('utf8');
-@@ -332,6 +452,13 @@ export class ExtensionHostConnection extends Disposable {
+@@ -332,6 +447,13 @@ export class ExtensionHostConnection extends Disposable {
  			this._logError(`Failed to start extension host process`);
  			this._logService.error(error);
  			this._cleanResources();
@@ -1187,7 +1182,7 @@ index 4a38e83e..8b79d7ad 100644
  
  	public acceptReconnection(remoteAddress: string, socket: ISocket, initialDataChunk: VSBuffer): void {
 diff --git a/lib/vscode/src/vs/server/node/remoteTerminalChannel.ts b/lib/vscode/src/vs/server/node/remoteTerminalChannel.ts
-index f2bbe6a4..bee79a44 100644
+index f2bbe6a4..1b42120d 100644
 --- a/lib/vscode/src/vs/server/node/remoteTerminalChannel.ts
 +++ b/lib/vscode/src/vs/server/node/remoteTerminalChannel.ts
 @@ -27,6 +27,7 @@ import { ICreateTerminalProcessArguments, ICreateTerminalProcessResult, IWorkspa
@@ -1217,14 +1212,22 @@ index f2bbe6a4..bee79a44 100644
  			}
  			case RemoteTerminalChannelRequest.AttachToProcess: return this._ptyHostService.attachToProcess.apply(this._ptyHostService, args);
  			case RemoteTerminalChannelRequest.DetachFromProcess: return this._ptyHostService.detachFromProcess.apply(this._ptyHostService, args);
-@@ -151,7 +153,21 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
+@@ -151,7 +153,29 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
  			case RemoteTerminalChannelRequest.SetTerminalLayoutInfo: return this._ptyHostService.setTerminalLayoutInfo(<ISetTerminalLayoutInfoArgs>args);
  			case RemoteTerminalChannelRequest.SerializeTerminalState: return this._ptyHostService.serializeTerminalState.apply(this._ptyHostService, args);
  			case RemoteTerminalChannelRequest.ReviveTerminalProcesses: return this._ptyHostService.reviveTerminalProcesses.apply(this._ptyHostService, args);
 -			case RemoteTerminalChannelRequest.GetRevivedPtyNewId: return this._ptyHostService.getRevivedPtyNewId.apply(this._ptyHostService, args);
 +			case RemoteTerminalChannelRequest.GetRevivedPtyNewId: {
 +				const view = this._managedView(ctx);
-+				const reserved = view !== undefined && this._managedViews.beginTerminalCreate(view.viewId, view.bindingEpoch);
++				let reserved = false;
++				if (view) {
++					reserved = this._managedViews.beginTerminalCreate(view.viewId, view.bindingEpoch);
++					if (!reserved) {
++						// The view stopped accepting terminals. Reject before the PTY host
++						// can hand out an id for a shell that no owner would ever track.
++						throw new Error('managed view is closing; terminal was not created');
++					}
++				}
 +				try {
 +					const revivedId = await this._ptyHostService.getRevivedPtyNewId(args[0], args[1]);
 +					if (typeof revivedId === 'number') {
@@ -1240,7 +1243,7 @@ index f2bbe6a4..bee79a44 100644
  			case RemoteTerminalChannelRequest.SetUnicodeVersion: return this._ptyHostService.setUnicodeVersion.apply(this._ptyHostService, args);
  			case RemoteTerminalChannelRequest.SetNextCommandId: return this._ptyHostService.setNextCommandId.apply(this._ptyHostService, args);
  			case RemoteTerminalChannelRequest.ReduceConnectionGraceTime: return this._reduceConnectionGraceTime();
-@@ -190,7 +206,44 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
+@@ -190,7 +214,44 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
  		throw new Error(`IPC Command ${event} not found`);
  	}
  
@@ -1286,7 +1289,7 @@ index f2bbe6a4..bee79a44 100644
  		const shellLaunchConfig: IShellLaunchConfig = {
  			name: args.shellLaunchConfig.name,
  			executable: args.shellLaunchConfig.executable,
-@@ -268,6 +321,7 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
+@@ -268,6 +329,7 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
  		env.VSCODE_IPC_HOOK_CLI = ipcHandlePath;
  
  		const persistentProcessId = await this._ptyHostService.createProcess(shellLaunchConfig, initialCwd, args.cols, args.rows, args.unicodeVersion, env, baseEnv, args.options, args.shouldPersistTerminal, args.workspaceId, args.workspaceName);
@@ -1386,18 +1389,35 @@ index a0391a1b..783954b7 100644
  
 diff --git a/lib/vscode/src/vs/server/test/node/managedViews.test.ts b/lib/vscode/src/vs/server/test/node/managedViews.test.ts
 new file mode 100644
-index 00000000..2a5357d0
+index 00000000..cbaf8327
 --- /dev/null
 +++ b/lib/vscode/src/vs/server/test/node/managedViews.test.ts
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,411 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
 + *--------------------------------------------------------------------------------------------*/
 +
 +import assert from 'assert';
++import * as fs from 'fs';
++import * as net from 'net';
++import * as os from 'os';
++import { VSBuffer } from '../../../base/common/buffer.js';
++import { join } from '../../../base/common/path.js';
++import { NodeSocket } from '../../../base/parts/ipc/node/ipc.net.js';
++import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../base/test/common/utils.js';
++import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
++import { IExtensionManagementService } from '../../../platform/extensionManagement/common/extensionManagement.js';
 +import { NullLogService } from '../../../platform/log/common/log.js';
-+import { ManagedViewTracker } from '../../node/managedViews.js';
++import { IProductService } from '../../../platform/product/common/productService.js';
++import { RemoteAgentConnectionContext } from '../../../platform/remote/common/remoteAgentEnvironment.js';
++import { IPtyHostService } from '../../../platform/terminal/common/terminal.js';
++import { RemoteTerminalChannelRequest } from '../../../workbench/contrib/terminal/common/remote/terminal.js';
++import { ExtensionHostConnection } from '../../node/extensionHostConnection.js';
++import { IExtensionHostStatusService } from '../../node/extensionHostStatusService.js';
++import { ManagedExtensionHostHandle, ManagedViewTracker } from '../../node/managedViews.js';
++import { RemoteTerminalChannel } from '../../node/remoteTerminalChannel.js';
++import { IServerEnvironmentService } from '../../node/serverEnvironmentService.js';
 +
 +function viewId(index: number): string {
 +	return `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`;
@@ -1413,6 +1433,8 @@ index 00000000..2a5357d0
 +}
 +
 +suite('ManagedViewTracker', () => {
++	ensureNoDisposablesAreLeakedInTestSuite();
++
 +	test('bounds confirmed closed tombstones and keeps recent identities idempotent', async () => {
 +		const tracker = new ManagedViewTracker(new NullLogService());
 +		await closeViews(tracker, 0, 256);
@@ -1434,11 +1456,11 @@ index 00000000..2a5357d0
 +
 +	test('refreshes a terminal PID that was not registered at attach time', async () => {
 +		const tracker = new ManagedViewTracker(new NullLogService());
-+		let process: { id: number; pid: number } | undefined;
++		const knownProcesses: { id: number; pid: number }[] = [];
 +		const ptyService = {
 +			onProcessReady: () => ({ dispose: () => undefined }),
 +			onProcessExit: () => ({ dispose: () => undefined }),
-+			listProcesses: async () => process ? [process] : [],
++			listProcesses: async () => [...knownProcesses],
 +		} as unknown as Parameters<ManagedViewTracker['setPtyService']>[0];
 +		tracker.setPtyService(ptyService);
 +
@@ -1450,8 +1472,335 @@ index 00000000..2a5357d0
 +		assert.strictEqual(inspected.terminals.length, 1);
 +		assert.strictEqual(inspected.terminals[0].pid, undefined);
 +
-+		process = { id: 7, pid: 1234 };
++		knownProcesses.push({ id: 7, pid: 1234 });
 +		inspected = await tracker.inspectView(id, '1');
 +		assert.strictEqual(inspected.terminals[0].pid, 1234);
++	});
++});
++
++/**
++ * A process is alive when the kernel still knows its pid. A reaped pid raises
++ * ESRCH, which is the exit evidence the managed view relies on.
++ */
++function isProcessAlive(pid: number): boolean {
++	try {
++		process.kill(pid, 0);
++		return true;
++	} catch (error) {
++		return (error as NodeJS.ErrnoException).code === 'EPERM';
++	}
++}
++
++/**
++ * Observes the extension host reservation lifecycle of the real tracker so the
++ * test can prove when the pending start settled relative to the child exit.
++ */
++class ObservedExtensionHostTracker extends ManagedViewTracker {
++
++	public pendingExtensionHostStarts = 0;
++	public attachRejected = false;
++	public attachSawClosedConnection = false;
++	public attachSawLiveChild = false;
++	public isConnectionClosed: () => boolean = () => false;
++	public getChildPid: () => number | undefined = () => undefined;
++	public onPendingStartSettled: (() => void) | undefined;
++
++	public override beginExtensionHostStart(viewId: string, bindingEpoch: string): boolean {
++		const reserved = super.beginExtensionHostStart(viewId, bindingEpoch);
++		if (reserved) {
++			this.pendingExtensionHostStarts++;
++		}
++		return reserved;
++	}
++
++	public override endExtensionHostStart(viewId: string, bindingEpoch: string): void {
++		this.pendingExtensionHostStarts--;
++		this.onPendingStartSettled?.();
++		super.endExtensionHostStart(viewId, bindingEpoch);
++	}
++
++	public override attachExtensionHost(viewId: string, bindingEpoch: string, handle: ManagedExtensionHostHandle): boolean {
++		this.attachSawClosedConnection = this.isConnectionClosed();
++		const pid = this.getChildPid();
++		this.attachSawLiveChild = pid !== undefined && isProcessAlive(pid);
++		const attached = super.attachExtensionHost(viewId, bindingEpoch, handle);
++		if (!attached) {
++			this.attachRejected = true;
++		}
++		return attached;
++	}
++}
++
++/**
++ * Observes the terminal reservation lifecycle of the real tracker so a leaked
++ * reservation is detected without waiting for the cleanup budget.
++ */
++class ObservedTerminalTracker extends ManagedViewTracker {
++
++	public pendingTerminalCreates = 0;
++
++	public override beginTerminalCreate(viewId: string, bindingEpoch: string): boolean {
++		const reserved = super.beginTerminalCreate(viewId, bindingEpoch);
++		if (reserved) {
++			this.pendingTerminalCreates++;
++		}
++		return reserved;
++	}
++
++	public override endTerminalCreate(viewId: string, bindingEpoch: string): void {
++		this.pendingTerminalCreates--;
++		super.endTerminalCreate(viewId, bindingEpoch);
++	}
++}
++
++suite('ExtensionHostConnection managed view lifecycle', () => {
++	ensureNoDisposablesAreLeakedInTestSuite();
++
++	const target = viewId(1);
++	const other = viewId(2);
++	let root: string;
++
++	setup(() => {
++		root = fs.mkdtempSync(join(os.tmpdir(), 'kk-managed-ext-host-'));
++		// The extension host fork path is resolved through the file root, so the
++		// test owns the exact program the connection starts. The program stays
++		// alive until it is terminated, which gives the test a real child.
++		fs.writeFileSync(join(root, 'bootstrap-fork.js'), 'setInterval(() => { }, 1000);\n');
++	});
++
++	teardown(() => {
++		fs.rmSync(root, { recursive: true, force: true });
++	});
++
++	function createConnection(): ExtensionHostConnection {
++		const environmentService = {
++			args: { 'force-disable-user-env': true },
++			userDataPath: root,
++			appRoot: root,
++			isBuilt: true,
++			reconnectionGraceTime: 10800000
++		} as unknown as IServerEnvironmentService;
++		const statusService = {
++			setExitInfo: () => undefined,
++			getExitInfo: () => null
++		} as unknown as IExtensionHostStatusService;
++		const configurationService = {
++			getValue: () => undefined
++		} as unknown as IConfigurationService;
++		return new ExtensionHostConnection(
++			'reconnection-token',
++			'remote-address',
++			new NodeSocket(new net.Socket()),
++			VSBuffer.alloc(0),
++			environmentService,
++			new NullLogService(),
++			statusService,
++			configurationService
++		);
++	}
++
++	/**
++	 * Runs the test body with the file root pointed at the test program. The
++	 * file root is always restored and a child that outlived the test is
++	 * terminated, so a failing assertion cannot leak a process or a global.
++	 */
++	async function withFileRoot(connection: ExtensionHostConnection, body: () => Promise<void>): Promise<void> {
++		const previousFileRoot = globalThis._VSCODE_FILE_ROOT;
++		globalThis._VSCODE_FILE_ROOT = root;
++		try {
++			await body();
++		} finally {
++			globalThis._VSCODE_FILE_ROOT = previousFileRoot;
++			const pid = connection.pid;
++			if (pid !== undefined && isProcessAlive(pid)) {
++				try {
++					process.kill(pid, 'SIGKILL');
++				} catch {
++					// The child is already gone.
++				}
++			}
++		}
++	}
++
++	test('terminates a rejected extension host child and settles the pending start only after the child exited', async function () {
++		this.timeout(30000);
++
++		const tracker = new ObservedExtensionHostTracker(new NullLogService());
++		await tracker.registerView(target, '1', '/workspace');
++		await tracker.registerView(other, '1', '/workspace');
++
++		const connection = createConnection();
++		connection.setManagedView(tracker, { viewId: target, bindingEpoch: '1' });
++
++		let connectionClosed = false;
++		const onCloseListener = connection.onClose(() => { connectionClosed = true; });
++		tracker.isConnectionClosed = () => connectionClosed;
++		tracker.getChildPid = () => connection.pid;
++		let childAliveWhenPendingSettled: boolean | undefined;
++		tracker.onPendingStartSettled = () => {
++			const pid = connection.pid;
++			childAliveWhenPendingSettled = pid === undefined ? undefined : isProcessAlive(pid);
++		};
++
++		try {
++			await withFileRoot(connection, async () => {
++				// The reservation is taken synchronously. The close that follows freezes
++				// the view, so the registration of the forked child is rejected while the
++				// connection is neither disposed nor terminating.
++				const start = connection.start({ env: {}, language: 'en' });
++				assert.strictEqual(tracker.pendingExtensionHostStarts, 1);
++				const close = tracker.closeView(target, '1', 'expired');
++
++				await start;
++
++				assert.strictEqual(tracker.attachRejected, true, 'the extension host registration must be rejected');
++				assert.strictEqual(tracker.attachSawClosedConnection, false, 'the connection must not be disposed before the rejection');
++				assert.strictEqual(tracker.attachSawLiveChild, true, 'the rejected registration must observe a live child process');
++				assert.strictEqual(tracker.pendingExtensionHostStarts, 0, 'the pending start must be settled');
++				// The child was killed and its exit was awaited before the pending start
++				// settled, so the process is already gone at that point.
++				assert.strictEqual(childAliveWhenPendingSettled, false, 'the child must be gone when the pending start settles');
++				assert.notStrictEqual(connection.pid, undefined, 'the forked child must be observable');
++				assert.strictEqual(isProcessAlive(connection.pid!), false, 'the forked child must not survive the rejection');
++
++				const closed = await close;
++				assert.strictEqual(closed.state, 'CLOSED');
++				assert.deepStrictEqual(closed.failures, []);
++				assert.strictEqual(closed.releasedExtensionHosts, 0);
++
++				// A rejected extension host belongs to its own view only.
++				const otherInspection = await tracker.inspectView(other, '1');
++				assert.strictEqual(otherInspection.state, 'OPEN');
++				assert.deepStrictEqual(otherInspection.extensionHosts, []);
++			});
++		} finally {
++			onCloseListener.dispose();
++			connection.dispose();
++		}
++	});
++
++	test('keeps a registered extension host alive for its view and reports exit evidence on close', async function () {
++		this.timeout(30000);
++
++		const tracker = new ObservedExtensionHostTracker(new NullLogService());
++		await tracker.registerView(target, '1', '/workspace');
++
++		let exited = false;
++		const handle: ManagedExtensionHostHandle = {
++			id: 'extension-host-1',
++			pid: 4242,
++			terminate: async () => { exited = true; }
++		};
++		assert.strictEqual(tracker.attachExtensionHost(target, '1', handle), true);
++
++		const closed = await tracker.closeView(target, '1', 'expired');
++		assert.strictEqual(exited, true, 'the close must wait for the exit evidence');
++		assert.strictEqual(closed.state, 'CLOSED');
++		assert.strictEqual(closed.releasedExtensionHosts, 1);
++	});
++});
++
++suite('RemoteTerminalChannel managed view terminals', () => {
++	ensureNoDisposablesAreLeakedInTestSuite();
++
++	const target = viewId(3);
++	let tracker: ObservedTerminalTracker;
++	let ptyCalls: number;
++	let ptyFailure: Error | undefined;
++
++	async function createChannel(): Promise<RemoteTerminalChannel> {
++		tracker = new ObservedTerminalTracker(new NullLogService());
++		ptyCalls = 0;
++		ptyFailure = undefined;
++		const ptyService = {
++			getRevivedPtyNewId: async () => {
++				ptyCalls++;
++				if (ptyFailure) {
++					throw ptyFailure;
++				}
++				return 42;
++			},
++			listProcesses: async () => [],
++			onProcessReady: () => ({ dispose: () => undefined }),
++			onProcessExit: () => ({ dispose: () => undefined }),
++			shutdown: async () => undefined
++		} as unknown as IPtyHostService;
++		tracker.setPtyService(ptyService);
++		const channel = new RemoteTerminalChannel(
++			{} as unknown as IServerEnvironmentService,
++			new NullLogService(),
++			ptyService,
++			{} as unknown as IProductService,
++			{} as unknown as IExtensionManagementService,
++			{} as unknown as IConfigurationService,
++			tracker
++		);
++		await tracker.registerView(target, '1', '/workspace');
++		return channel;
++	}
++
++	function context(bindingEpoch = '1'): RemoteAgentConnectionContext {
++		return { remoteAuthority: 'test', clientId: 'test', viewId: target, bindingEpoch };
++	}
++
++	test('rejects a revived terminal before the PTY host is asked for an id', async () => {
++		const channel = await createChannel();
++		try {
++			await tracker.closeView(target, '1', 'expired');
++
++			await assert.rejects(
++				channel.call(context(), RemoteTerminalChannelRequest.GetRevivedPtyNewId, ['workspace', 7]),
++				/terminal was not created/
++			);
++			assert.strictEqual(ptyCalls, 0, 'the PTY host must not be called for a rejected view');
++			assert.strictEqual(tracker.pendingTerminalCreates, 0, 'a rejected request must not reserve a terminal');
++		} finally {
++			channel.dispose();
++		}
++	});
++
++	test('rejects a revived terminal for a stale binding epoch before the PTY host is asked for an id', async () => {
++		const channel = await createChannel();
++		try {
++			await assert.rejects(
++				channel.call(context('2'), RemoteTerminalChannelRequest.GetRevivedPtyNewId, ['workspace', 7]),
++				/terminal was not created/
++			);
++			assert.strictEqual(ptyCalls, 0, 'the PTY host must not be called for a stale binding epoch');
++			assert.strictEqual(tracker.pendingTerminalCreates, 0);
++		} finally {
++			channel.dispose();
++		}
++	});
++
++	test('releases the terminal reservation when the PTY host succeeds', async () => {
++		const channel = await createChannel();
++		try {
++			const revivedId = await channel.call(context(), RemoteTerminalChannelRequest.GetRevivedPtyNewId, ['workspace', 7]);
++			assert.strictEqual(revivedId, 42);
++			assert.strictEqual(ptyCalls, 1);
++			assert.strictEqual(tracker.pendingTerminalCreates, 0, 'the reservation must be released on success');
++
++			const inspection = await tracker.inspectView(target, '1');
++			assert.strictEqual(inspection.terminals.length, 1);
++			assert.strictEqual(inspection.terminals[0].id, 42);
++		} finally {
++			channel.dispose();
++		}
++	});
++
++	test('releases the terminal reservation when the PTY host fails', async () => {
++		const channel = await createChannel();
++		try {
++			ptyFailure = new Error('pty host is gone');
++			await assert.rejects(
++				channel.call(context(), RemoteTerminalChannelRequest.GetRevivedPtyNewId, ['workspace', 7]),
++				/pty host is gone/
++			);
++			assert.strictEqual(ptyCalls, 1);
++			assert.strictEqual(tracker.pendingTerminalCreates, 0, 'the reservation must be released on failure');
++		} finally {
++			channel.dispose();
++		}
 +	});
 +});

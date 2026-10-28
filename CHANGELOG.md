@@ -48,6 +48,12 @@ Code v1.141.0
 - Closed-view tombstones are bounded at 256 confirmed, fully released records
   in both the local manager and the embedded VS Code tracker. Active or
   retryable views are never evicted.
+- An extension host that the view refuses to register is terminated on the
+  exact child process that was forked, and its exit is awaited before the
+  pending start is released. The extension host no longer outlives the view
+  that rejected it.
+- A revived terminal for a view that stopped accepting terminals is rejected
+  before the PTY host is asked for an id, so no untracked shell is created.
 
 ## Unreleased
 
