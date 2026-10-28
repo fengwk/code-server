@@ -107,32 +107,38 @@ async function waitForPidExit(pid: number): Promise<void> {
 }
 
 async function descendantPids(root: number): Promise<number[]> {
-  const entries = await fs.readdir("/proc")
-  const children = new Map<number, number[]>()
-  for (const entry of entries) {
-    if (!/^\d+$/.test(entry)) {
-      continue
-    }
+  const descendants = new Set<number>()
+  // Walk only the fixture-owned process and children reported by its own threads.
+  const visit = async (pid: number): Promise<void> => {
+    let threads: string[]
     try {
-      const stat = await fs.readFile(path.join("/proc", entry, "stat"), "utf8")
-      const close = stat.lastIndexOf(")")
-      const ppid = Number(stat.slice(close + 2).split(" ")[1])
-      const list = children.get(ppid) ?? []
-      list.push(Number(entry))
-      children.set(ppid, list)
-    } catch {
-      // Processes can exit while /proc is scanned.
+      threads = await fs.readdir(`/proc/${pid}/task`)
+    } catch (error) {
+      if (["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+        return
+      }
+      throw error
+    }
+    for (const thread of threads) {
+      let children: string
+      try {
+        children = await fs.readFile(`/proc/${pid}/task/${thread}/children`, "utf8")
+      } catch (error) {
+        if (["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+          continue
+        }
+        throw error
+      }
+      for (const child of children.trim().split(/\s+/).filter(Boolean).map(Number)) {
+        if (!descendants.has(child)) {
+          descendants.add(child)
+          await visit(child)
+        }
+      }
     }
   }
-  const result: number[] = []
-  const visit = (pid: number) => {
-    for (const child of children.get(pid) ?? []) {
-      result.push(child)
-      visit(child)
-    }
-  }
-  visit(root)
-  return result
+  await visit(root)
+  return [...descendants]
 }
 
 async function requestHeader(address: string, pathname: string, header: string): Promise<string | undefined> {
@@ -154,6 +160,16 @@ describe(
   { KK_STUDIO_IDE_MANAGEMENT_TOKEN: TOKEN },
   () => {
     test.setTimeout(600000)
+
+    test.afterEach(async ({ codeServer }) => {
+      const root = await codeServer.pid()
+      const children = await descendantPids(root)
+      await codeServer.close()
+      await waitForPidExit(root)
+      for (const pid of children) {
+        await waitForPidExit(pid)
+      }
+    })
 
     test("real extension hosts and terminals are isolated per view and close with exit evidence", async ({
       codeServer,
@@ -320,6 +336,7 @@ describe(
       // The code-server process tree returns to a stable shared baseline. Cycles
       // must not accumulate extension hosts or shells beyond the shared pty host.
       await new Promise((resolve) => setTimeout(resolve, 1000))
+      expect(pidAlive(serverPid)).toBe(true)
       const baseline = await descendantPids(serverPid)
       for (let cycle = 0; cycle < 3; cycle++) {
         const epoch = String(10 + cycle)
@@ -370,6 +387,7 @@ describe(
       expect((await request(address, "GET", "/__kk/ide/views")).body.views).toEqual([])
 
       await new Promise((resolve) => setTimeout(resolve, 1000))
+      expect(pidAlive(serverPid)).toBe(true)
       const final = await descendantPids(serverPid)
       expect(final.length).toBeLessThanOrEqual(baseline.length + 1)
     })
