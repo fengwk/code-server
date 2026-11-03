@@ -152,6 +152,9 @@ describe("ensureAddress", () => {
   it("should throw and error if no address", () => {
     expect(() => ensureAddress(mockServer, "http")).toThrow("Server has no address")
   })
+  it("should describe a --socket-fd listener by its fd when node reports no address", () => {
+    expect(ensureAddress(mockServer, "http", 4)).toBe("fd:4")
+  })
   it("should return the address if it's a string", async () => {
     mockServer.address = () => "/path/to/unix.sock"
     const address = ensureAddress(mockServer, "http")
@@ -268,7 +271,6 @@ describe("listen (socket-fd)", () => {
   // activation case where the process inherits an fd and calls listen(2) on it.
   // Using a live net.Server's fd instead fails with EEXIST because the socket
   // is already listening in-process.
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { TCP, constants: TCPConstants } = (process as any).binding("tcp_wrap")
 
   let inherited: any

@@ -22,11 +22,11 @@ describe("managed release", () => {
 
   // The candidate version is fixed in one place: dispatch and tag publishes
   // must agree, and the source metadata keeps the upstream Code tag separate.
-  it("targets the 4.143.1-kk.1 candidate consistently", () => {
-    assert.equal(workflow.match(/4\.143\.1-kk\.1/g)?.length, 2)
-    assert.doesNotMatch(workflow, /4\.141\.0-kk\.2/)
-    assert.ok(workflow.includes('--arg upstreamTag "v4.143.1"'))
-    assert.ok(workflow.includes("tag=v4.143.1-kk.1"))
+  it("targets the 4.144.0-kk.1 candidate consistently", () => {
+    assert.equal(workflow.match(/4\.144\.0-kk\.1/g)?.length, 2)
+    assert.doesNotMatch(workflow, /4\.143\.1-kk\.1/)
+    assert.ok(workflow.includes('--arg upstreamTag "v4.144.0"'))
+    assert.ok(workflow.includes("tag=v4.144.0-kk.1"))
   })
 
   // A managed-view patch that misses a VS Code file leaves the built server
@@ -37,8 +37,9 @@ describe("managed release", () => {
       .readFileSync(path.join(root, "patches/series"), "utf8")
       .split("\n")
       .filter((line) => line.length > 0)
-    assert.equal(series.filter((line) => line === "managed-views.diff").length, 1)
-    assert.ok(series.indexOf("managed-views.diff") > series.indexOf("managed-runtime.diff"))
+    assert.equal(series.length, 32)
+    assert.equal(new Set(series).size, series.length)
+    assert.deepEqual(series.slice(-3), ["disable-file-cache.diff", "managed-runtime.diff", "managed-views.diff"])
     const patch = fs.readFileSync(path.join(root, "patches/managed-views.diff"), "utf8")
     for (const file of [
       "src/vs/base/parts/ipc/common/ipc.ts",
@@ -223,7 +224,7 @@ describe("node version contract", () => {
     const codeServer = fs.readFileSync(path.join(root, ".node-version"), "utf8").trim()
     const vscode = fs.readFileSync(path.join(root, "lib/vscode/.nvmrc"), "utf8").trim()
     assert.equal(codeServer, "24.22.1")
-    assert.equal(vscode, "24.18.0")
+    assert.equal(vscode, "24.22.1")
     assert.equal(codeServer.startsWith("24."), true)
     assert.equal(vscode.startsWith("24."), true)
   })
