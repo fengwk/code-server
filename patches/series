@@ -26,7 +26,7 @@ copilot.diff
 app-name.diff
 remote-storage.diff
 remote-secret-storage.diff
-csp-hashes.diff
 disable-file-cache.diff
+csp-hashes.diff
 managed-runtime.diff
 managed-views.diff

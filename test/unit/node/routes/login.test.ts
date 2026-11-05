@@ -68,6 +68,20 @@ describe("login", () => {
       }
     })
 
+    // A proxied page must not be able to read the session cookie via JavaScript.
+    it("sets the session cookie with HttpOnly on successful login", async () => {
+      const resp = await codeServer().fetch("/login", {
+        method: "POST",
+        body: new URLSearchParams({ password: "test" }),
+        redirect: "manual",
+      })
+      expect(resp.status).toBe(302)
+      const cookies = resp.headers.raw()["set-cookie"]
+      expect(cookies).toHaveLength(1)
+      expect(cookies[0]).toMatch(/^code-server-session=/)
+      expect(cookies[0]).toMatch(/;\s*HttpOnly(?:;|$)/i)
+    })
+
     it("should return 'Missing password' without body", async () => {
       const resp = await codeServer().fetch("/login", { method: "POST" })
       const htmlContent = await resp.text()

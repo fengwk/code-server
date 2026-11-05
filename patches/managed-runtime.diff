@@ -107,7 +107,7 @@ Index: code-server/lib/vscode/src/vs/workbench/services/configuration/test/brows
  import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
 @@ -60,6 +60,7 @@ import { PolicyCategory } from '../../../../../base/common/policy.js';
  import { ExperimentalSettingsService } from '../../common/experimentalSettings.js';
- import { DisposableStore } from '../../../../../base/common/lifecycle.js';
+ import { DisposableStore, toDisposable } from '../../../../../base/common/lifecycle.js';
  import { CancellationError } from '../../../../../base/common/errors.js';
 +import { WorkspaceConfiguration } from '../../browser/configuration.js';
  
