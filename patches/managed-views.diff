@@ -77,7 +77,7 @@ index 06d614be..7c7d76c1 100644
  import { IServerEnvironmentService } from './serverEnvironmentService.js';
  import { IPCExtHostConnection, SocketExtHostConnection, writeExtHostConnection } from '../../workbench/services/extensions/common/extensionHostEnv.js';
  import { IExtHostReadyMessage, IExtHostReduceGraceTimeMessage, IExtHostSocketMessage } from '../../workbench/services/extensions/common/extensionHostProtocol.js';
-+import { ManagedViewContext, ManagedViewTracker } from './managedViews.js';
++import { applyManagedViewIdentity, ManagedViewContext, ManagedViewTracker } from './managedViews.js';
  
  export async function buildUserEnvironment(startParamsEnv: { [key: string]: string | null } = {}, withUserShellEnvironment: boolean, language: string, environmentService: IServerEnvironmentService, logService: ILogService, configurationService: IConfigurationService): Promise<IProcessEnvironment> {
  	const nlsConfig = await getNLSConfiguration(language, environmentService.userDataPath);
@@ -212,7 +212,16 @@ index 06d614be..7c7d76c1 100644
  		try {
  			let execArgv: string[] = process.execArgv ? process.execArgv.filter(a => !/^--inspect(-brk)?=/.test(a)) : [];
  			// eslint-disable-next-line local/code-no-any-casts, @typescript-eslint/no-explicit-any
-@@ -280,6 +372,12 @@ export class ExtensionHostConnection extends Disposable {
+@@ -260,6 +352,8 @@ export class ExtensionHostConnection extends Disposable {
+ 			const env = await buildUserEnvironment(startParams.env, true, startParams.language, this._environmentService, this._logService, this._configurationService);
+ 			removeDangerousEnvVariables(env);
++			// Renderer env is untrusted; only the verified request binding identifies a managed host.
++			applyManagedViewIdentity(env, this._managedView);
+ 
+ 			let extHostNamedPipeServer: net.Server | null;
+ 
+ 			if (this._canSendSocket) {
+@@ -280,6 +374,12 @@ export class ExtensionHostConnection extends Disposable {
  			// Refs https://github.com/microsoft/vscode/issues/189805
  			opts.execArgv.unshift('--dns-result-order=ipv4first');
  
@@ -225,7 +234,7 @@ index 06d614be..7c7d76c1 100644
  			// Run Extension Host as fork of current process
  			const args = ['--type=extensionHost', `--transformURIs`];
  			const useHostProxy = this._environmentService.args['use-host-proxy'];
-@@ -289,8 +387,25 @@ export class ExtensionHostConnection extends Disposable {
+@@ -289,8 +389,25 @@ export class ExtensionHostConnection extends Disposable {
  			}
  			this._extensionHostProcess = cp.fork(FileAccess.asFileUri('bootstrap-fork').fsPath, args, opts);
  			const pid = this._extensionHostProcess.pid;
@@ -251,7 +260,7 @@ index 06d614be..7c7d76c1 100644
  			// Catch all output coming from the extension host process
  			this._extensionHostProcess.stdout!.setEncoding('utf8');
  			this._extensionHostProcess.stderr!.setEncoding('utf8');
-@@ -332,6 +447,13 @@ export class ExtensionHostConnection extends Disposable {
+@@ -332,6 +449,13 @@ export class ExtensionHostConnection extends Disposable {
  			this._logError(`Failed to start extension host process`);
  			this._logService.error(error);
  			this._cleanResources();
@@ -270,7 +279,7 @@ new file mode 100644
 index 00000000..6b541786
 --- /dev/null
 +++ b/lib/vscode/src/vs/server/node/managedViews.ts
-@@ -0,0 +1,655 @@
+@@ -0,0 +1,665 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -294,6 +303,16 @@ index 00000000..6b541786
 +export interface ManagedViewContext {
 +	viewId: string;
 +	bindingEpoch: string;
++}
++
++/** Replace any inherited/renderer-supplied identity with the server-verified binding. */
++export function applyManagedViewIdentity(env: { [key: string]: string | undefined }, view: ManagedViewContext | undefined): void {
++	delete env.KK_STUDIO_IDE_VIEW_ID;
++	delete env.KK_STUDIO_IDE_BINDING_EPOCH;
++	if (view) {
++		env.KK_STUDIO_IDE_VIEW_ID = view.viewId;
++		env.KK_STUDIO_IDE_BINDING_EPOCH = view.bindingEpoch;
++	}
 +}
 +
 +export interface ManagedViewResourceFact {
@@ -1392,7 +1411,7 @@ new file mode 100644
 index 00000000..cbaf8327
 --- /dev/null
 +++ b/lib/vscode/src/vs/server/test/node/managedViews.test.ts
-@@ -0,0 +1,411 @@
+@@ -0,0 +1,445 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1404,6 +1423,7 @@ index 00000000..cbaf8327
 +import * as os from 'os';
 +import { VSBuffer } from '../../../base/common/buffer.js';
 +import { join } from '../../../base/common/path.js';
++import { sanitizeProcessEnvironment } from '../../../base/common/processes.js';
 +import { NodeSocket } from '../../../base/parts/ipc/node/ipc.net.js';
 +import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../base/test/common/utils.js';
 +import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
@@ -1415,7 +1435,7 @@ index 00000000..cbaf8327
 +import { RemoteTerminalChannelRequest } from '../../../workbench/contrib/terminal/common/remote/terminal.js';
 +import { ExtensionHostConnection } from '../../node/extensionHostConnection.js';
 +import { IExtensionHostStatusService } from '../../node/extensionHostStatusService.js';
-+import { ManagedExtensionHostHandle, ManagedViewTracker } from '../../node/managedViews.js';
++import { applyManagedViewIdentity, ManagedExtensionHostHandle, ManagedViewTracker } from '../../node/managedViews.js';
 +import { RemoteTerminalChannel } from '../../node/remoteTerminalChannel.js';
 +import { IServerEnvironmentService } from '../../node/serverEnvironmentService.js';
 +
@@ -1431,6 +1451,39 @@ index 00000000..cbaf8327
 +		assert.strictEqual(result.state, 'CLOSED');
 +	}
 +}
++
++suite('ManagedView identity environment', () => {
++	test('uses verified view identity and removes inherited fake identity for unmanaged hosts', () => {
++		const env: { [key: string]: string | undefined } = {
++			KK_STUDIO_IDE_VIEW_ID: 'renderer-view',
++			KK_STUDIO_IDE_BINDING_EPOCH: '999',
++		};
++		applyManagedViewIdentity(env, { viewId: viewId(1), bindingEpoch: '2' });
++		assert.strictEqual(env.KK_STUDIO_IDE_VIEW_ID, viewId(1));
++		assert.strictEqual(env.KK_STUDIO_IDE_BINDING_EPOCH, '2');
++
++		applyManagedViewIdentity(env, undefined);
++		assert.strictEqual(env.KK_STUDIO_IDE_VIEW_ID, undefined);
++		assert.strictEqual(env.KK_STUDIO_IDE_BINDING_EPOCH, undefined);
++	});
++
++	test('strips IDE bridge controls from user terminals while preserving normal environment', () => {
++		const env: { [key: string]: string | undefined } = {
++			PATH: '/bin',
++			KK_STUDIO_IDE_BRIDGE_URL: 'http://bridge',
++			KK_STUDIO_IDE_BRIDGE_TOKEN: 'private',
++			KK_STUDIO_IDE_MANAGEMENT_TOKEN: 'private',
++			KK_STUDIO_IDE_VIEW_ID: 'private',
++			KK_STUDIO_IDE_BINDING_EPOCH: 'private',
++			KK_STUDIO_CODE_SERVER_DATA_DIR: '/managed/runtime',
++			USER_SETTING: 'keep',
++		};
++		sanitizeProcessEnvironment(env);
++		assert.strictEqual(env.PATH, '/bin');
++		assert.strictEqual(env.USER_SETTING, 'keep');
++		assert.strictEqual(Object.keys(env).length, 2);
++	});
++});
 +
 +suite('ManagedViewTracker', () => {
 +	ensureNoDisposablesAreLeakedInTestSuite();

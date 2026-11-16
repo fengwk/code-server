@@ -22,11 +22,11 @@ describe("managed release", () => {
 
   // The candidate version is fixed in one place: dispatch and tag publishes
   // must agree, and the source metadata keeps the upstream Code tag separate.
-  it("targets the 4.145.0-kk.1 candidate consistently", () => {
-    assert.equal(workflow.match(/4\.145\.0-kk\.1/g)?.length, 2)
+  it("targets the 4.145.0-kk.2 candidate consistently", () => {
+    assert.equal(workflow.match(/4\.145\.0-kk\.2/g)?.length, 2)
     assert.doesNotMatch(workflow, /4\.144\.0-kk\.1/)
     assert.ok(workflow.includes('--arg upstreamTag "v4.145.0"'))
-    assert.ok(workflow.includes("tag=v4.145.0-kk.1"))
+    assert.ok(workflow.includes("tag=v4.145.0-kk.2"))
   })
 
   // A managed-view patch that misses a VS Code file leaves the built server

@@ -100,6 +100,51 @@ describe("getEnvPaths", () => {
   })
 })
 
+describe("managed getEnvPaths", () => {
+  it.each(["linux", "darwin", "win32"] as const)(
+    "uses the dedicated root on %s without relying on platform globals",
+    async (platform) => {
+      const name = `managed-paths-${platform}`
+      const root = await tempDirHelper(name)
+      const previous = process.env.KK_STUDIO_CODE_SERVER_DATA_DIR
+      process.env.KK_STUDIO_CODE_SERVER_DATA_DIR = root
+      try {
+        const paths = util.getEnvPaths(platform)
+        expect(paths).toEqual({
+          data: root,
+          config: path.join(root, "config"),
+          cache: path.join(root, "cache"),
+          runtime: path.join(root, "runtime"),
+        })
+        for (const directory of Object.values(paths)) {
+          expect((await fs.stat(directory)).isDirectory()).toBe(true)
+        }
+      } finally {
+        if (previous === undefined) {
+          delete process.env.KK_STUDIO_CODE_SERVER_DATA_DIR
+        } else {
+          process.env.KK_STUDIO_CODE_SERVER_DATA_DIR = previous
+        }
+        await clean(name)
+      }
+    },
+  )
+
+  it("rejects a relative managed root instead of redirecting it into the user profile", () => {
+    const previous = process.env.KK_STUDIO_CODE_SERVER_DATA_DIR
+    process.env.KK_STUDIO_CODE_SERVER_DATA_DIR = "relative-root"
+    try {
+      expect(() => util.getEnvPaths("linux")).toThrow("must be absolute")
+    } finally {
+      if (previous === undefined) {
+        delete process.env.KK_STUDIO_CODE_SERVER_DATA_DIR
+      } else {
+        process.env.KK_STUDIO_CODE_SERVER_DATA_DIR = previous
+      }
+    }
+  })
+})
+
 describe("hash", () => {
   it("should return a hash of the string passed in", async () => {
     const plainTextPassword = "mySecretPassword123"

@@ -24,7 +24,7 @@ Index: code-server/lib/vscode/src/vs/server/node/server.main.ts
  import product from '../../platform/product/common/product.js';
  import * as perf from '../../base/common/performance.js';
  
-@@ -34,40 +34,49 @@ const errorReporter: ErrorReporter = {
+@@ -34,40 +34,53 @@ const errorReporter: ErrorReporter = {
  	}
  };
  
@@ -62,13 +62,17 @@ Index: code-server/lib/vscode/src/vs/server/node/server.main.ts
 +	const GLOBAL_STORAGE_HOME = join(APP_SETTINGS_HOME, 'globalStorage');
 +	const LOCAL_HISTORY_HOME = join(APP_SETTINGS_HOME, 'History');
 +	const MACHINE_SETTINGS_HOME = join(USER_DATA_PATH, 'Machine');
++	if (process.env['KK_STUDIO_CODE_SERVER_DATA_DIR']) {
++		// Keep SharedStorageMainService inside the managed code-server data root.
++		args['shared-data-dir'] = join(USER_DATA_PATH, 'shared');
++	}
 +	args['user-data-dir'] = USER_DATA_PATH;
 +	const APP_ROOT = dirname(FileAccess.asFileUri('').fsPath);
 +	const BUILTIN_EXTENSIONS_FOLDER_PATH = args['builtin-extensions-dir'] || join(APP_ROOT, 'extensions');
 +	args['builtin-extensions-dir'] = BUILTIN_EXTENSIONS_FOLDER_PATH;
 +	args['extensions-dir'] = args['extensions-dir'] || join(REMOTE_DATA_FOLDER, 'extensions');
 +
-+	[REMOTE_DATA_FOLDER, args['extensions-dir'], USER_DATA_PATH, APP_SETTINGS_HOME, MACHINE_SETTINGS_HOME, GLOBAL_STORAGE_HOME, LOCAL_HISTORY_HOME].forEach(f => {
++	[REMOTE_DATA_FOLDER, args['extensions-dir'], USER_DATA_PATH, APP_SETTINGS_HOME, MACHINE_SETTINGS_HOME, GLOBAL_STORAGE_HOME, LOCAL_HISTORY_HOME, args['shared-data-dir']].filter((f): f is string => typeof f === 'string').forEach(f => {
 +		try {
 +			if (!fs.existsSync(f)) {
 +				fs.mkdirSync(f, { mode: 0o700, recursive: true });
@@ -105,12 +109,17 @@ Index: code-server/lib/vscode/src/vs/base/common/processes.ts
 ===================================================================
 --- code-server.orig/lib/vscode/src/vs/base/common/processes.ts
 +++ code-server/lib/vscode/src/vs/base/common/processes.ts
-@@ -111,6 +111,8 @@ export function sanitizeProcessEnvironme
+@@ -111,6 +111,13 @@ export function sanitizeProcessEnvironme
  		/^VSCODE_(?!(PORTABLE|SHELL_LOGIN|ENV_REPLACE|ENV_APPEND|ENV_PREPEND)).+$/,
  		/^SNAP(|_.*)$/,
  		/^GDK_PIXBUF_.+$/,
 +		/^CODE_SERVER_.+$/,
 +		/^CS_.+$/,
++		/^KK_STUDIO_IDE_BRIDGE_.+$/,
++		/^KK_STUDIO_IDE_MANAGEMENT_TOKEN$/,
++		/^KK_STUDIO_IDE_VIEW_ID$/,
++		/^KK_STUDIO_IDE_BINDING_EPOCH$/,
++		/^KK_STUDIO_CODE_SERVER_DATA_DIR$/,
  	];
  	const envKeys = Object.keys(env);
  	envKeys

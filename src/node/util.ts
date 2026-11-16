@@ -2,6 +2,7 @@ import * as argon2 from "argon2"
 import * as cp from "child_process"
 import * as crypto from "crypto"
 import envPaths from "env-paths"
+import * as fsSync from "fs"
 import { promises as fs } from "fs"
 import * as net from "net"
 import * as os from "os"
@@ -13,6 +14,7 @@ import xdgBasedir from "xdg-basedir"
 export interface Paths {
   data: string
   config: string
+  cache: string
   runtime: string
 }
 
@@ -57,6 +59,23 @@ export const paths = getEnvPaths()
  * ones. Most CLIs do this as in practice only GUI apps use the standard macOS directories.
  */
 export function getEnvPaths(platform = process.platform): Paths {
+  const managedRoot = process.env.KK_STUDIO_CODE_SERVER_DATA_DIR
+  if (managedRoot) {
+    if (!path.isAbsolute(managedRoot)) {
+      throw new Error("KK_STUDIO_CODE_SERVER_DATA_DIR must be absolute")
+    }
+    const managedPaths = {
+      data: managedRoot,
+      config: path.join(managedRoot, "config"),
+      cache: path.join(managedRoot, "cache"),
+      runtime: path.join(managedRoot, "runtime"),
+    }
+    for (const directory of Object.values(managedPaths)) {
+      fsSync.mkdirSync(directory, { mode: 0o700, recursive: true })
+    }
+    return managedPaths
+  }
+
   const paths = envPaths("code-server", { suffix: "" })
   const append = (p: string): string => path.join(p, "code-server")
   switch (platform) {
@@ -66,6 +85,7 @@ export function getEnvPaths(platform = process.platform): Paths {
         // to align with other CLI tools.
         data: xdgBasedir.data ? append(xdgBasedir.data) : paths.data,
         config: xdgBasedir.config ? append(xdgBasedir.config) : paths.config,
+        cache: xdgBasedir.cache ? append(xdgBasedir.cache) : paths.cache,
         // Fall back to temp if there is no runtime dir.
         runtime: xdgBasedir.runtime ? append(xdgBasedir.runtime) : paths.temp,
       }
@@ -73,6 +93,7 @@ export function getEnvPaths(platform = process.platform): Paths {
       return {
         data: paths.data,
         config: paths.config,
+        cache: paths.cache,
         // Windows doesn't have a runtime dir.
         runtime: paths.temp,
       }
@@ -80,6 +101,7 @@ export function getEnvPaths(platform = process.platform): Paths {
       return {
         data: paths.data,
         config: paths.config,
+        cache: xdgBasedir.cache ? append(xdgBasedir.cache) : paths.cache,
         // Fall back to temp if there is no runtime dir.
         runtime: xdgBasedir.runtime ? append(xdgBasedir.runtime) : paths.temp,
       }
