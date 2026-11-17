@@ -22,11 +22,11 @@ describe("managed release", () => {
 
   // The candidate version is fixed in one place: dispatch and tag publishes
   // must agree, and the source metadata keeps the upstream Code tag separate.
-  it("targets the 4.145.2-kk.1 candidate consistently", () => {
-    assert.equal(workflow.match(/4\.145\.2-kk\.1/g)?.length, 2)
-    assert.doesNotMatch(workflow, /4\.144\.0-kk\.1/)
+  it("targets the 4.145.2-kk.2 candidate without replacing the previous tag", () => {
+    assert.equal(workflow.match(/4\.145\.2-kk\.2/g)?.length, 2)
+    assert.doesNotMatch(workflow, /4\.145\.2-kk\.1/)
     assert.ok(workflow.includes('--arg upstreamTag "v4.145.2"'))
-    assert.ok(workflow.includes("tag=v4.145.2-kk.1"))
+    assert.ok(workflow.includes("tag=v4.145.2-kk.2"))
   })
 
   // A managed-view patch that misses a VS Code file leaves the built server
@@ -56,6 +56,17 @@ describe("managed release", () => {
     ]) {
       assert.ok(patch.includes(`diff --git a/lib/vscode/${file} b/lib/vscode/${file}`), file)
     }
+  })
+
+  // The server option must be declared and typed before server.main can route
+  // managed shared storage to the environment service.
+  it("passes managed shared storage through the typed server contract", () => {
+    const integration = fs.readFileSync(path.join(root, "patches/integration.diff"), "utf8")
+    const managedViews = fs.readFileSync(path.join(root, "patches/managed-views.diff"), "utf8")
+    assert.ok(integration.includes("'shared-data-dir': OPTIONS['shared-data-dir']"))
+    assert.ok(integration.includes("'shared-data-dir'?: string;"))
+    assert.ok(managedViews.includes("ServerEnvironmentService managed shared data"))
+    assert.ok(managedViews.includes("environmentService.appSharedDataHome.fsPath, sharedDataDir"))
   })
 
   // Asset names and provenance are fixed by the product contract, not derived

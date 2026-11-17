@@ -105,6 +105,26 @@ Index: code-server/lib/vscode/src/vs/server/node/server.main.ts
 +// The aliases prevent the names getting mangled during minification which would
 +// make it difficult to import.
 +export { spawnCli as spawnCli, createServer as createServer };
+Index: code-server/lib/vscode/src/vs/server/node/serverEnvironmentService.ts
+===================================================================
+--- code-server.orig/lib/vscode/src/vs/server/node/serverEnvironmentService.ts
++++ code-server/lib/vscode/src/vs/server/node/serverEnvironmentService.ts
+@@ -53,7 +53,8 @@ export const serverOptions: OptionDescriptions<Required<ServerParsedArgs>> = {
+ 
+ 	'user-data-dir': OPTIONS['user-data-dir'],
++	'shared-data-dir': OPTIONS['shared-data-dir'],
+ 	'enable-smoke-test-driver': OPTIONS['enable-smoke-test-driver'],
+ 	'disable-telemetry': OPTIONS['disable-telemetry'],
+ 	'disable-experiments': OPTIONS['disable-experiments'],
+ 	'disable-workspace-trust': OPTIONS['disable-workspace-trust'],
+ 	'file-watcher-polling': { type: 'string', deprecates: ['fileWatcherPolling'] },
+@@ -183,5 +184,6 @@ export interface ServerParsedArgs {
+ 	/* ----- vs code options ----- */
+ 
+ 	'user-data-dir'?: string;
++	'shared-data-dir'?: string;
+ 
+ 	'enable-smoke-test-driver'?: boolean;
 Index: code-server/lib/vscode/src/vs/base/common/processes.ts
 ===================================================================
 --- code-server.orig/lib/vscode/src/vs/base/common/processes.ts
