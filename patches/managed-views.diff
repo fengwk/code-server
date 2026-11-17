@@ -1431,7 +1431,7 @@ new file mode 100644
 index 00000000..cbaf8327
 --- /dev/null
 +++ b/lib/vscode/src/vs/server/test/node/managedViews.test.ts
-@@ -0,0 +1,588 @@
+@@ -0,0 +1,589 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1443,6 +1443,7 @@ index 00000000..cbaf8327
 +import * as os from 'os';
 +import { VSBuffer } from '../../../base/common/buffer.js';
 +import { join } from '../../../base/common/path.js';
++import { URI } from '../../../base/common/uri.js';
 +import { sanitizeKkStudioTerminalEnvironment } from '../../../base/common/processes.js';
 +import { NodeSocket } from '../../../base/parts/ipc/node/ipc.net.js';
 +import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../base/test/common/utils.js';
@@ -1472,7 +1473,7 @@ index 00000000..cbaf8327
 +			nameShort: 'Code',
 +			sharedDataFolderName: '.vscode-oss-shared',
 +		} as IProductService);
-+		assert.strictEqual(environmentService.appSharedDataHome.fsPath, sharedDataDir);
++		assert.strictEqual(environmentService.appSharedDataHome.fsPath, URI.file(sharedDataDir).fsPath);
 +	});
 +});
 +

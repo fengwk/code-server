@@ -67,7 +67,7 @@ describe("managed release", () => {
     assert.ok(integration.includes("'shared-data-dir': OPTIONS['shared-data-dir']"))
     assert.ok(integration.includes("'shared-data-dir'?: string;"))
     assert.ok(managedViews.includes("ServerEnvironmentService managed shared data"))
-    assert.ok(managedViews.includes("environmentService.appSharedDataHome.fsPath, sharedDataDir"))
+    assert.ok(managedViews.includes("environmentService.appSharedDataHome.fsPath, URI.file(sharedDataDir).fsPath"))
   })
 
   // Quilt applies only the number of lines declared in a unified-diff hunk. Parse
