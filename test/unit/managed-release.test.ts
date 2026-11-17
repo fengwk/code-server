@@ -4,6 +4,7 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 import { fileURLToPath } from "node:url"
 import * as path from "path"
+import ts from "typescript"
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 
@@ -67,6 +68,30 @@ describe("managed release", () => {
     assert.ok(integration.includes("'shared-data-dir'?: string;"))
     assert.ok(managedViews.includes("ServerEnvironmentService managed shared data"))
     assert.ok(managedViews.includes("environmentService.appSharedDataHome.fsPath, sharedDataDir"))
+  })
+
+  // Quilt applies only the number of lines declared in a unified-diff hunk. Parse
+  // the resulting new-file source so a stale count cannot silently truncate it.
+  it("keeps the patched managed-view test complete and syntactically valid", () => {
+    const patch = fs.readFileSync(path.join(root, "patches/managed-views.diff"), "utf8")
+    const fileDiff = patch
+      .split("diff --git ")
+      .find((section) =>
+        section.startsWith(
+          "a/lib/vscode/src/vs/server/test/node/managedViews.test.ts b/lib/vscode/src/vs/server/test/node/managedViews.test.ts",
+        ),
+      )
+    assert.ok(fileDiff, "managedViews core test patch section must exist")
+    const [, declaredLines, hunkBody] = fileDiff.match(/@@ -0,0 \+1,(\d+) @@\n([\s\S]*)$/) ?? []
+    assert.ok(declaredLines, "managedViews core test must be a new-file hunk")
+    const addedLines = hunkBody
+      .split("\n")
+      .filter((line) => line.startsWith("+"))
+      .map((line) => line.slice(1))
+    assert.equal(addedLines.length, Number(declaredLines), "patch hunk line count must include the complete test")
+    const source = addedLines.slice(0, Number(declaredLines)).join("\n")
+    const parsed = ts.createSourceFile("managedViews.test.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+    assert.deepEqual(parsed.parseDiagnostics, [], "patched managedViews core test must parse without syntax errors")
   })
 
   // Asset names and provenance are fixed by the product contract, not derived

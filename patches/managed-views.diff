@@ -1431,7 +1431,7 @@ new file mode 100644
 index 00000000..cbaf8327
 --- /dev/null
 +++ b/lib/vscode/src/vs/server/test/node/managedViews.test.ts
-@@ -0,0 +1,586 @@
+@@ -0,0 +1,588 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
