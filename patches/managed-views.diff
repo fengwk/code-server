@@ -1431,7 +1431,7 @@ new file mode 100644
 index 00000000..cbaf8327
 --- /dev/null
 +++ b/lib/vscode/src/vs/server/test/node/managedViews.test.ts
-@@ -0,0 +1,476 @@
+@@ -0,0 +1,569 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1811,12 +1811,31 @@ index 00000000..cbaf8327
 +	let tracker: ObservedTerminalTracker;
 +	let ptyCalls: number;
 +	let ptyFailure: Error | undefined;
++	let capturedTerminalEnv: Record<string, string | undefined> | undefined;
++	let capturedBaseEnv: Record<string, string | undefined> | undefined;
++	let createProcessCalls: number;
 +
 +	async function createChannel(): Promise<RemoteTerminalChannel> {
 +		tracker = new ObservedTerminalTracker(new NullLogService());
 +		ptyCalls = 0;
 +		ptyFailure = undefined;
++		capturedTerminalEnv = undefined;
++		capturedBaseEnv = undefined;
++		createProcessCalls = 0;
++		const environmentService = {
++			args: { 'force-disable-user-env': true },
++			userDataPath: os.tmpdir(),
++			appRoot: os.tmpdir(),
++			isBuilt: true,
++			reconnectionGraceTime: 0
++		} as unknown as IServerEnvironmentService;
 +		const ptyService = {
++			createProcess: async (...args: unknown[]) => {
++				createProcessCalls++;
++				capturedTerminalEnv = args[5] as Record<string, string | undefined>;
++				capturedBaseEnv = args[6] as Record<string, string | undefined>;
++				throw new Error('captured PTY environments');
++			},
 +			getRevivedPtyNewId: async () => {
 +				ptyCalls++;
 +				if (ptyFailure) {
@@ -1831,12 +1850,12 @@ index 00000000..cbaf8327
 +		} as unknown as IPtyHostService;
 +		tracker.setPtyService(ptyService);
 +		const channel = new RemoteTerminalChannel(
-+			{} as unknown as IServerEnvironmentService,
++			environmentService,
 +			new NullLogService(),
 +			ptyService,
-+			{} as unknown as IProductService,
++			{ version: 'test-version' } as unknown as IProductService,
 +			{} as unknown as IExtensionManagementService,
-+			{} as unknown as IConfigurationService,
++			{ getValue: () => undefined } as unknown as IConfigurationService,
 +			tracker
 +		);
 +		await tracker.registerView(target, '1', '/workspace');
@@ -1846,6 +1865,80 @@ index 00000000..cbaf8327
 +	function context(bindingEpoch = '1'): RemoteAgentConnectionContext {
 +		return { remoteAuthority: 'test', clientId: 'test', viewId: target, bindingEpoch };
 +	}
++
++	test('strips reintroduced controls from the final PTY environment and preserves user variables', async () => {
++		const channel = await createChannel();
++		const terminalSettings = {
++			KK_STUDIO_IDE_BRIDGE_URL: 'http://terminal-config',
++			KK_STUDIO_IDE_BRIDGE_TOKEN: 'terminal-config-secret',
++			KK_STUDIO_IDE_MANAGEMENT_TOKEN: 'terminal-config-management-secret',
++			KK_STUDIO_IDE_VIEW_ID: 'terminal-config-view',
++			KK_STUDIO_IDE_BINDING_EPOCH: 'terminal-config-epoch',
++			KK_STUDIO_CODE_SERVER_DATA_DIR: '/terminal-config-data',
++			VSCODE_SHELL_LOGIN: '1',
++		};
++		const args = {
++			configuration: {
++				'terminal.integrated.env.linux': terminalSettings,
++				'terminal.integrated.env.osx': terminalSettings,
++				'terminal.integrated.env.windows': terminalSettings,
++				'terminal.integrated.detectLocale': 'off',
++			},
++			resolvedVariables: {},
++			envVariableCollections: [],
++			shellLaunchConfig: {
++				name: 'test',
++				executable: '/bin/sh',
++				args: [],
++				cwd: undefined,
++				env: { PATH: '/user/bin', VSCODE_SHELL_LOGIN: '1' },
++				useShellEnvironment: false,
++			},
++			workspaceId: 'workspace',
++			workspaceName: 'workspace',
++			workspaceFolders: [],
++			activeWorkspaceFolder: null,
++			activeFileResource: undefined,
++			shouldPersistTerminal: false,
++			options: {},
++			cols: 80,
++			rows: 24,
++			unicodeVersion: '11',
++			resolverEnv: {
++				KK_STUDIO_IDE_BRIDGE_TOKEN: 'resolver-secret',
++				KK_STUDIO_IDE_VIEW_ID: 'resolver-view',
++			},
++		};
++
++		try {
++			await assert.rejects(
++				channel.call(context(), RemoteTerminalChannelRequest.CreateProcess, args),
++				/captured PTY environments/
++			);
++
++			assert.strictEqual(createProcessCalls, 1);
++			assert.notStrictEqual(capturedTerminalEnv, undefined);
++			assert.notStrictEqual(capturedBaseEnv, undefined);
++			for (const key of [
++				'KK_STUDIO_IDE_BRIDGE_URL',
++				'KK_STUDIO_IDE_BRIDGE_TOKEN',
++				'KK_STUDIO_IDE_MANAGEMENT_TOKEN',
++				'KK_STUDIO_IDE_VIEW_ID',
++				'KK_STUDIO_IDE_BINDING_EPOCH',
++				'KK_STUDIO_CODE_SERVER_DATA_DIR',
++			]) {
++				assert.strictEqual(capturedTerminalEnv![key], undefined, `${key} must not reach createProcess`);
++				assert.strictEqual(capturedBaseEnv![key], undefined, `${key} must not reach createProcess`);
++			}
++			const terminalPathKey = Object.keys(capturedTerminalEnv!).find(key => key.toLowerCase() === 'path');
++			assert.ok(terminalPathKey);
++			assert.ok(capturedTerminalEnv![terminalPathKey!]?.includes('/user/bin'));
++			assert.strictEqual(capturedTerminalEnv!.VSCODE_SHELL_LOGIN, '1');
++			assert.ok(Object.keys(capturedBaseEnv!).some(key => key.toLowerCase() === 'path'));
++		} finally {
++			channel.dispose();
++		}
++	});
 +
 +	test('rejects a revived terminal before the PTY host is asked for an id', async () => {
 +		const channel = await createChannel();
