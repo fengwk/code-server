@@ -1204,6 +1204,9 @@ diff --git a/lib/vscode/src/vs/server/node/remoteTerminalChannel.ts b/lib/vscode
 index f2bbe6a4..1b42120d 100644
 --- a/lib/vscode/src/vs/server/node/remoteTerminalChannel.ts
 +++ b/lib/vscode/src/vs/server/node/remoteTerminalChannel.ts
+@@ -12,1 +12,1 @@
+-import { removeDangerousEnvVariables } from '../../base/common/processes.js';
++import { removeDangerousEnvVariables, sanitizeKkStudioTerminalEnvironment } from '../../base/common/processes.js';
 @@ -27,6 +27,7 @@ import { ICreateTerminalProcessArguments, ICreateTerminalProcessResult, IWorkspa
  import * as terminalEnvironment from '../../workbench/contrib/terminal/common/terminalEnvironment.js';
  import { AbstractVariableResolverService } from '../../workbench/services/configurationResolver/common/variableResolver.js';
@@ -1308,7 +1311,18 @@ index f2bbe6a4..1b42120d 100644
  		const shellLaunchConfig: IShellLaunchConfig = {
  			name: args.shellLaunchConfig.name,
  			executable: args.shellLaunchConfig.executable,
-@@ -268,6 +329,7 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
+@@ -260,6 +321,10 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
+ 			await mergedCollection.applyToProcessEnvironment(env, { workspaceFolder }, variableResolver);
+ 		}
+ 
++		// Final terminal settings and extension collections can reintroduce inherited controls.
++		sanitizeKkStudioTerminalEnvironment(env);
++		sanitizeKkStudioTerminalEnvironment(baseEnv);
++
+ 		// Fork the process and listen for messages
+ 		this._logService.debug(`Terminal process launching on remote agent`, { shellLaunchConfig, initialCwd, cols: args.cols, rows: args.rows, env });
+ 		// Setup the CLI server to support forwarding commands run from the CLI
+@@ -268,6 +333,7 @@ export class RemoteTerminalChannel extends Disposable implements IServerChannel<
  		env.VSCODE_IPC_HOOK_CLI = ipcHandlePath;
  
  		const persistentProcessId = await this._ptyHostService.createProcess(shellLaunchConfig, initialCwd, args.cols, args.rows, args.unicodeVersion, env, baseEnv, args.options, args.shouldPersistTerminal, args.workspaceId, args.workspaceName);
@@ -1411,7 +1425,7 @@ new file mode 100644
 index 00000000..cbaf8327
 --- /dev/null
 +++ b/lib/vscode/src/vs/server/test/node/managedViews.test.ts
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,476 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1423,7 +1437,7 @@ index 00000000..cbaf8327
 +import * as os from 'os';
 +import { VSBuffer } from '../../../base/common/buffer.js';
 +import { join } from '../../../base/common/path.js';
-+import { sanitizeProcessEnvironment } from '../../../base/common/processes.js';
++import { sanitizeKkStudioTerminalEnvironment } from '../../../base/common/processes.js';
 +import { NodeSocket } from '../../../base/parts/ipc/node/ipc.net.js';
 +import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../base/test/common/utils.js';
 +import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
@@ -1433,7 +1447,7 @@ index 00000000..cbaf8327
 +import { RemoteAgentConnectionContext } from '../../../platform/remote/common/remoteAgentEnvironment.js';
 +import { IPtyHostService } from '../../../platform/terminal/common/terminal.js';
 +import { RemoteTerminalChannelRequest } from '../../../workbench/contrib/terminal/common/remote/terminal.js';
-+import { ExtensionHostConnection } from '../../node/extensionHostConnection.js';
++import { buildUserEnvironment, ExtensionHostConnection } from '../../node/extensionHostConnection.js';
 +import { IExtensionHostStatusService } from '../../node/extensionHostStatusService.js';
 +import { applyManagedViewIdentity, ManagedExtensionHostHandle, ManagedViewTracker } from '../../node/managedViews.js';
 +import { RemoteTerminalChannel } from '../../node/remoteTerminalChannel.js';
@@ -1467,21 +1481,33 @@ index 00000000..cbaf8327
 +		assert.strictEqual(env.KK_STUDIO_IDE_BINDING_EPOCH, undefined);
 +	});
 +
-+	test('strips IDE bridge controls from user terminals while preserving normal environment', () => {
++	test('strips only private controls from final terminal environments', () => {
++		// Terminal configuration and extension collections run after initial sanitation.
 +		const env: { [key: string]: string | undefined } = {
 +			PATH: '/bin',
++			VSCODE_SHELL_LOGIN: '1',
 +			KK_STUDIO_IDE_BRIDGE_URL: 'http://bridge',
 +			KK_STUDIO_IDE_BRIDGE_TOKEN: 'private',
 +			KK_STUDIO_IDE_MANAGEMENT_TOKEN: 'private',
 +			KK_STUDIO_IDE_VIEW_ID: 'private',
 +			KK_STUDIO_IDE_BINDING_EPOCH: 'private',
 +			KK_STUDIO_CODE_SERVER_DATA_DIR: '/managed/runtime',
-+			USER_SETTING: 'keep',
++			KK_STUDIO_USER_SETTING: 'keep',
 +		};
-+		sanitizeProcessEnvironment(env);
-+		assert.strictEqual(env.PATH, '/bin');
-+		assert.strictEqual(env.USER_SETTING, 'keep');
-+		assert.strictEqual(Object.keys(env).length, 2);
++		const executableEnv = { ...env, VSCODE_IPC_HOOK_CLI: '/tmp/vscode-ipc' };
++		sanitizeKkStudioTerminalEnvironment(env);
++		sanitizeKkStudioTerminalEnvironment(executableEnv);
++		assert.deepStrictEqual(env, {
++			PATH: '/bin',
++			VSCODE_SHELL_LOGIN: '1',
++			KK_STUDIO_USER_SETTING: 'keep',
++		});
++		assert.deepStrictEqual(executableEnv, {
++			PATH: '/bin',
++			VSCODE_SHELL_LOGIN: '1',
++			KK_STUDIO_USER_SETTING: 'keep',
++			VSCODE_IPC_HOOK_CLI: '/tmp/vscode-ipc',
++		});
 +	});
 +});
 +
@@ -1623,6 +1649,25 @@ index 00000000..cbaf8327
 +
 +	teardown(() => {
 +		fs.rmSync(root, { recursive: true, force: true });
++	});
++
++	test('keeps the bridge secret in the extension host environment', async () => {
++		const environmentService = {
++			args: { 'force-disable-user-env': true },
++			userDataPath: root,
++			appRoot: root,
++			isBuilt: true,
++			reconnectionGraceTime: 10800000
++		} as unknown as IServerEnvironmentService;
++		const environment = await buildUserEnvironment(
++			{ KK_STUDIO_IDE_BRIDGE_TOKEN: 'extension-secret' },
++			false,
++			'en',
++			environmentService,
++			new NullLogService(),
++			{ getValue: () => undefined } as unknown as IConfigurationService
++		);
++		assert.strictEqual(environment.KK_STUDIO_IDE_BRIDGE_TOKEN, 'extension-secret');
 +	});
 +
 +	function createConnection(): ExtensionHostConnection {
