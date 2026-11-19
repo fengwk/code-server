@@ -1,11 +1,13 @@
 import * as fs from "fs"
-import * as yaml from "js-yaml"
 import assert from "node:assert/strict"
+import { createRequire } from "node:module"
 import { describe, it } from "node:test"
 import { fileURLToPath } from "node:url"
 import * as path from "path"
 import ts from "typescript"
 
+// The test package resolves CommonJS js-yaml; load through its actual exports.
+const yaml = createRequire(import.meta.url)("js-yaml") as typeof import("js-yaml")
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 
 describe("managed release", () => {
