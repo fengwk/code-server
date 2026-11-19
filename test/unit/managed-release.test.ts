@@ -1,5 +1,5 @@
 import * as fs from "fs"
-import yaml from "js-yaml"
+import * as yaml from "js-yaml"
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 import { fileURLToPath } from "node:url"
@@ -23,11 +23,11 @@ describe("managed release", () => {
 
   // The candidate version is fixed in one place: dispatch and tag publishes
   // must agree, and the source metadata keeps the upstream Code tag separate.
-  it("targets the 4.145.2-kk.2 candidate without replacing the previous tag", () => {
-    assert.equal(workflow.match(/4\.145\.2-kk\.2/g)?.length, 2)
+  it("targets the 4.145.2-kk.3 candidate without replacing the previous tag", () => {
+    assert.equal(workflow.match(/4\.145\.2-kk\.3/g)?.length, 2)
     assert.doesNotMatch(workflow, /4\.145\.2-kk\.1/)
     assert.ok(workflow.includes('--arg upstreamTag "v4.145.2"'))
-    assert.ok(workflow.includes("tag=v4.145.2-kk.2"))
+    assert.ok(workflow.includes("tag=v4.145.2-kk.3"))
   })
 
   // A managed-view patch that misses a VS Code file leaves the built server
@@ -38,9 +38,9 @@ describe("managed release", () => {
       .readFileSync(path.join(root, "patches/series"), "utf8")
       .split("\n")
       .filter((line) => line.length > 0)
-    assert.equal(series.length, 32)
+    assert.equal(series.length, 33)
     assert.equal(new Set(series).size, series.length)
-    assert.deepEqual(series.slice(-3), ["csp-hashes.diff", "managed-runtime.diff", "managed-views.diff"])
+    assert.deepEqual(series.slice(-4), ["csp-hashes.diff", "managed-runtime.diff", "managed-views.diff", "managed-workbench.diff"])
     const patch = fs.readFileSync(path.join(root, "patches/managed-views.diff"), "utf8")
     for (const file of [
       "src/vs/base/parts/ipc/common/ipc.ts",
@@ -92,6 +92,30 @@ describe("managed release", () => {
     const source = addedLines.slice(0, Number(declaredLines)).join("\n")
     const parsed = ts.createSourceFile("managedViews.test.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
     assert.deepEqual(parsed.parseDiagnostics, [], "patched managedViews core test must parse without syntax errors")
+  })
+
+  // The bridge can invoke this globally registered no-argument command; it
+  // refreshes the Explorer without opening a view, while only managed startup
+  // receives the initial Dark Modern fallback.
+  it("registers a no-reveal refresh command and managed-only initial Dark Modern fallback", () => {
+    const patch = fs.readFileSync(path.join(root, "patches/managed-workbench.diff"), "utf8")
+    assert.ok(
+      patch.includes(
+        "'kk-studio.refreshExplorer', (accessor: ServicesAccessor) => accessor.get(IExplorerService).refresh(false)",
+      ),
+    )
+    assert.ok(patch.includes("refresh(reveal?: boolean): Promise<void>"))
+    assert.ok(
+      patch.includes(
+        "configurationDefaults: managedView ? { 'workbench.colorTheme': 'Dark Modern' } : undefined",
+      ),
+    )
+    assert.ok(
+      patch.includes(
+        "initialColorTheme: managedView ? { themeType: ColorScheme.DARK, colors: managedInitialColorThemeColors } : undefined",
+      ),
+    )
+    assert.doesNotMatch(patch, /openView|autoReveal|workbench\.files\.action\.refreshFilesExplorer/)
   })
 
   // Asset names and provenance are fixed by the product contract, not derived

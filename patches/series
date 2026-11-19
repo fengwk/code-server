@@ -30,3 +30,4 @@ disable-file-cache.diff
 csp-hashes.diff
 managed-runtime.diff
 managed-views.diff
+managed-workbench.diff

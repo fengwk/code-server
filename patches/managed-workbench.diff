@@ -1,0 +1,70 @@
+Add a managed-only no-reveal Explorer refresh command and Dark Modern startup fallback
+
+diff --git a/lib/vscode/src/vs/server/node/webClientServer.ts b/lib/vscode/src/vs/server/node/webClientServer.ts
+index e2fa32d..e481e9a 100644
+--- a/lib/vscode/src/vs/server/node/webClientServer.ts
++++ b/lib/vscode/src/vs/server/node/webClientServer.ts
+@@ -29,6 +29,18 @@ import { CharCode } from '../../base/common/charCode.js';
+ import { IExtensionManifest } from '../../platform/extensions/common/extensions.js';
+ import { ICSSDevelopmentService } from '../../platform/cssDev/node/cssDevService.js';
+ import { htmlAttributeEncodeValue } from '../../base/common/strings.js';
++import { ColorScheme } from '../../platform/theme/common/theme.js';
++
++const managedInitialColorThemeColors = {
++	'editor.background': '#1F1F1F',
++	'editor.foreground': '#CCCCCC',
++	'editorGroupHeader.tabsBackground': '#181818',
++	'editorGroupHeader.connectedTabsBackground': '#2B2B2B',
++	'sideBar.background': '#181818',
++	'sideBar.foreground': '#CCCCCC',
++	'statusBar.background': '#181818',
++	'statusBar.foreground': '#CCCCCC',
++};
+ 
+ const textMimeType: { [ext: string]: string | undefined } = {
+ 	'.html': 'text/html',
+@@ -457,7 +469,9 @@ export class WebClientServer {
+ 			workspaceUri: resolveWorkspaceURI(this._environmentService.args['default-workspace']),
+ 			productConfiguration,
+ 			callbackRoute: callbackRoute,
+-			remoteStorageEnabled: this._environmentService.args['enable-remote-storage'] ? true : undefined
++			remoteStorageEnabled: this._environmentService.args['enable-remote-storage'] ? true : undefined,
++			configurationDefaults: managedView ? { 'workbench.colorTheme': 'Dark Modern' } : undefined,
++			initialColorTheme: managedView ? { themeType: ColorScheme.DARK, colors: managedInitialColorThemeColors } : undefined
+ 		};
+ 
+ 		const cookies = cookie.parse(req.headers.cookie || '');
+diff --git a/lib/vscode/src/vs/workbench/contrib/files/browser/files.ts b/lib/vscode/src/vs/workbench/contrib/files/browser/files.ts
+index c6ba54c..f383408 100644
+--- a/lib/vscode/src/vs/workbench/contrib/files/browser/files.ts
++++ b/lib/vscode/src/vs/workbench/contrib/files/browser/files.ts
+@@ -33,7 +33,7 @@ export interface IExplorerService {
+ 	isEditable(stat: ExplorerItem | undefined): boolean;
+ 	findClosest(resource: URI): ExplorerItem | null;
+ 	findClosestRoot(resource: URI): ExplorerItem | null;
+-	refresh(): Promise<void>;
++	refresh(reveal?: boolean): Promise<void>;
+ 	setToCopy(stats: ExplorerItem[], cut: boolean): Promise<void>;
+ 	isCut(stat: ExplorerItem): boolean;
+ 	applyBulkEdit(edit: ResourceFileEdit[], options: { undoLabel: string; progressLabel: string; confirmBeforeUndo?: boolean; progressLocation?: ProgressLocation.Explorer | ProgressLocation.Window }): Promise<void>;
+diff --git a/lib/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.ts b/lib/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.ts
+index cf95db6..f7d7abb 100644
+--- a/lib/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.ts
++++ b/lib/vscode/src/vs/workbench/contrib/files/browser/views/explorerView.ts
+@@ -56,6 +56,7 @@ import { AbstractTreePart } from '../../../../../base/browser/ui/tree/abstractTree.js';
+ import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
+ import { IAccessibilityService } from '../../../../../platform/accessibility/common/accessibility.js';
+ import { IEnvironmentService } from '../../../../../platform/environment/common/environment.js';
++import { CommandsRegistry } from '../../../../../platform/commands/common/commands.js';
+ 
+ 
+ function hasExpandedRootChild(tree: WorkbenchCompressibleAsyncDataTree<ExplorerItem | ExplorerItem[], ExplorerItem, FuzzyScore>, treeInput: ExplorerItem[]): boolean {
+@@ -1149,6 +1150,8 @@ registerAction2(class extends Action2 {
+ 	}
+ });
+ 
++CommandsRegistry.registerCommand('kk-studio.refreshExplorer', (accessor: ServicesAccessor) => accessor.get(IExplorerService).refresh(false));
++
+ registerAction2(class extends Action2 {
+ 	constructor() {
+ 		super({
