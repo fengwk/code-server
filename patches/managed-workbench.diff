@@ -1,4 +1,4 @@
-Add a managed-only no-reveal Explorer refresh command and Dark Modern startup fallback
+Add a no-reveal Explorer command and a managed Workbench Dark Modern startup fallback
 
 diff --git a/lib/vscode/src/vs/server/node/webClientServer.ts b/lib/vscode/src/vs/server/node/webClientServer.ts
 index e2fa32d..e481e9a 100644
