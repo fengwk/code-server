@@ -208,12 +208,10 @@ describe("managed view lifecycle", () => {
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "kk-managed-views-"))
-    const directoryA = path.join(root, "a")
-    const directoryB = path.join(root, "b")
-    await fs.mkdir(directoryA)
-    await fs.mkdir(directoryB)
-    workspaceA = directoryA
-    workspaceB = directoryB
+    workspaceA = path.join(root, "a.code-workspace")
+    workspaceB = path.join(root, "b.code-workspace")
+    await fs.writeFile(workspaceA, '{"folders":[]}')
+    await fs.writeFile(workspaceB, '{"folders":[]}')
     runtime = new FakeRuntime()
     manager = new ManagedViewManager({ managementToken: "token", resourceExitTimeoutMs: 25 })
   })
@@ -226,6 +224,9 @@ describe("managed view lifecycle", () => {
   test("register is idempotent for the same binding and rejects rollback", async () => {
     const first = await manager.register(VIEW_A, "2", workspaceA, runtime)
     const second = await manager.register(VIEW_A, "2", workspaceA, runtime)
+    expect(manager.openWorkspacePath(VIEW_A, "2")).toBe(workspaceA)
+    expect(manager.openWorkspacePath(VIEW_A, "1")).toBeUndefined()
+    expect(manager.openWorkspacePath(VIEW_B, "2")).toBeUndefined()
     expect(first.state).toBe("OPEN")
     expect(second.state).toBe("OPEN")
     expect(runtime.registrations).toEqual([`${VIEW_A}:2`])
@@ -438,11 +439,9 @@ describe("managed view lifecycle", () => {
     expect(manager.hasView(VIEW_A)).toBe(false)
   })
 
-  test("canonicalizes existing workspace directories and workspace files", async () => {
-    const workspaceFile = path.join(root, "a.code-workspace")
-    await fs.writeFile(workspaceFile, "{}")
+  test("requires a workspace file and refuses directories", async () => {
     await expect(canonicalWorkspacePath(workspaceA)).resolves.toBe(workspaceA)
-    await expect(canonicalWorkspacePath(workspaceFile)).resolves.toBe(workspaceFile)
+    await expect(canonicalWorkspacePath(root)).rejects.toMatchObject({ code: "INVALID_WORKSPACE_PATH" })
     await expect(canonicalWorkspacePath(path.join(root, "missing"))).rejects.toMatchObject({
       code: "WORKSPACE_NOT_FOUND",
     })

@@ -171,6 +171,104 @@ describe(
       }
     })
 
+    // Exercise the candidate Workbench in an iframe; Studio owns the effects of these messages.
+    test("native actions use the registered workspace and message the embedding tab", async ({ codeServer, page }) => {
+      const address = await codeServer.address()
+      const root = await codeServer.workspaceDir
+      const directory = path.join(root, "selected%2F目录")
+      await fs.mkdir(path.join(directory, "picker-ready"), { recursive: true })
+      const workspace = path.join(root, "registered%2F空.code-workspace")
+      const otherWorkspace = path.join(root, "other.code-workspace")
+      const emptyWorkspace = JSON.stringify({ folders: [] })
+      await fs.writeFile(workspace, emptyWorkspace)
+      await fs.writeFile(otherWorkspace, JSON.stringify({ folders: [{ path: directory }] }))
+      await register(address, VIEW_A, "1", workspace)
+
+      const query = new URLSearchParams({
+        folder: directory,
+        workspace: otherWorkspace,
+        ew: "true",
+        payload: JSON.stringify([["openFile", otherWorkspace]]),
+      })
+      const viewUrl = `${address}/__kk/ide/view/${VIEW_A}/1/?${query}`
+      const hostUrl = `${address}/native-actions-fixture`
+      await page.route(hostUrl, (route) =>
+        route.fulfill({ contentType: "text/html", body: '<iframe style="width: 100%; height: 95vh"></iframe>' }),
+      )
+      await page.goto(hostUrl)
+      const messages: Record<string, string>[] = []
+      await page.exposeFunction("recordStudioAction", (message: Record<string, string>) => messages.push(message))
+      await page.evaluate((url) => {
+        const frame = document.querySelector("iframe")!
+        window.addEventListener("message", (event) => {
+          if (
+            event.origin === location.origin &&
+            event.source === frame.contentWindow &&
+            event.data?.type === "kk-studio.ide.native-action"
+          ) {
+            void (window as unknown as { recordStudioAction(message: unknown): Promise<void> }).recordStudioAction(
+              event.data,
+            )
+          }
+        })
+        frame.src = url
+      }, viewUrl)
+      const workbench = page.frameLocator("iframe")
+      const openFolder = workbench.getByRole("button", { name: "Open Folder", exact: true })
+      await expect(openFolder).toBeVisible()
+      const config = await workbench.locator("#vscode-workbench-web-configuration").getAttribute("data-settings")
+      expect(JSON.parse(config!).workspaceUri.path).toBe(workspace)
+
+      const quickInput = workbench.locator(".quick-input-widget")
+      const input = quickInput.locator("input")
+      const runCommand = async (title: string) => {
+        await workbench.locator(".monaco-workbench").press("Control+Shift+P")
+        await expect(input).toBeVisible()
+        await input.fill(`>${title}`)
+        await quickInput.getByText(title, { exact: true }).click()
+      }
+      // Verify the effective client workspace, not only the injected server config.
+      await runCommand("Workspaces: Open Workspace Configuration File")
+      await expect(workbench.getByRole("tab", { name: /registered%2F空\.code-workspace/ })).toBeVisible()
+
+      const popupUrls: string[] = []
+      page.on("popup", (popup) => popupUrls.push(popup.url()))
+      await openFolder.click()
+      await expect(quickInput.locator(".quick-input-title")).toHaveText("Open Folder")
+      await input.fill(`${directory}${path.sep}`)
+      await expect(quickInput.getByText("picker-ready", { exact: true })).toBeVisible()
+      await quickInput.getByRole("button", { name: "OK", exact: true }).click()
+      const actionBase = { type: "kk-studio.ide.native-action", viewId: VIEW_A, bindingEpoch: "1" }
+      await expect.poll(() => messages.length).toBe(1)
+      const { directory: pickedDirectory, ...openAction } = messages[0]
+      expect(pickedDirectory).toBe(directory)
+      expect(openAction).toEqual({ ...actionBase, action: "open-folder" })
+
+      await runCommand("New Window")
+      await runCommand("Close This Workspace")
+      await expect
+        .poll(() => messages.slice(1))
+        .toEqual([
+          { ...actionBase, action: "new-window" },
+          { ...actionBase, action: "close-workspace" },
+        ])
+      expect(popupUrls).toEqual([])
+      expect(page.frames().map((frame) => frame.url())).toContain(viewUrl)
+      expect(await fs.readFile(workspace, "utf8")).toBe(emptyWorkspace)
+
+      // Public requests cannot opt into managed mode with client-supplied headers.
+      const standalone = await page.request.get(`${address}/`, {
+        headers: {
+          "x-kk-managed-view": "1",
+          "x-kk-view-id": VIEW_A,
+          "x-kk-binding-epoch": "1",
+          "x-kk-workspace-path": Buffer.from(workspace).toString("base64url"),
+        },
+      })
+      expect(standalone.ok()).toBe(true)
+      expect(await standalone.text()).not.toContain("studioManagedView")
+    })
+
     test("real extension hosts and terminals are isolated per view and close with exit evidence", async ({
       codeServer,
       browser,

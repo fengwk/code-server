@@ -1,6 +1,6 @@
 # Managed views
 
-This fork (`4.145.0-kk.1`, Code `1.145.0`) exposes isolated code-server views to
+This fork (`4.145.2-kk.4` candidate) exposes isolated code-server views to
 the KK Studio daemon. A view is a browser workbench bound to one workspace,
 binding epoch, extension host, terminal set and management connection.
 
@@ -23,6 +23,12 @@ An old epoch is rejected with HTTP 410. A view cannot be reached through
 another view's URL, and its browser session/WebSocket scope does not authorize a
 different view.
 
+## Workbench actions in Studio
+
+The server passes the registered workspace file to the Workbench; a managed view ignores `folder`, `workspace`, `ew`, and `payload` from the browser URL. Studio can register an empty workspace (`folders: []`) without selecting a directory. Workspace menus cannot replace that binding, but the Daemon bridge can still update workspace folders through the VS Code extension API. This is not a filesystem sandbox.
+
+Open Folder uses the VS Code picker and sends the remote URI path to Studio as-is. New Window asks Studio for another tab, and Close This Workspace (including the File menu's Close Workspace action) asks Studio to close the current tab through its normal close flow. The fixed `kk-studio.ide.native-action` message carries the view ID and binding epoch, and the directory only for Open Folder. Delivery is to the same-origin parent; a top-level managed Workbench does not open another browser tab as a fallback. Open File stays in the current editor. Standalone code-server keeps its usual commands and navigation.
+
 ## Management API
 
 The local daemon uses these routes:
@@ -40,8 +46,7 @@ exact loopback peer (`127.0.0.1`, `::1` or `::ffff:127.0.0.1`) with a
 constant-time token match. The API is disabled with HTTP 503 when the token is
 not configured. Tokens, request headers and request bodies are never logged.
 
-`workspacePath` must already exist and is canonicalized to a directory or a
-`.code-workspace` file. Registering the same view/epoch is idempotent.
+`workspacePath` must canonicalize to an existing `.code-workspace` file. Registering the same view/epoch is idempotent.
 Registering the same view with a higher epoch rebinds it; a lower epoch is
 rejected as `VIEW_EPOCH_ROLLBACK`. Request bodies are strict: unknown fields,
 wrong types, non-canonical IDs and epochs, and bodies above 16 KiB are rejected.
@@ -101,7 +106,7 @@ With the VS Code submodule checked out and patches applied as described in the
 # Node 24 is required by .node-version and lib/vscode/.nvmrc.
 nvm use
 npm ci
-export VERSION=4.145.0-kk.1
+export VERSION=4.145.2-kk.4
 npm run build
 npm run build:vscode
 KEEP_MODULES=1 npm run release
@@ -125,7 +130,7 @@ and exercise isolated managed views. The managed-view test creates a terminal in
 each view, rebinds one view to a higher epoch, verifies the old extension host
 exited while its terminal stayed alive, verifies the other view is unaffected,
 and closes both with PID exit evidence. It also checks normal-close dirty
-rejection, the service-worker scope, and a close-during-terminal-start race.
+rejection, the service-worker scope, and a close-during-terminal-start race. The native-action case exercises the candidate Workbench in a same-origin iframe with a registered empty workspace, verifies that URL parameters do not replace it, and checks the three messages without a Studio or Daemon deployment.
 
 ## Release entry
 
@@ -134,17 +139,17 @@ push to `kk-studio` builds all five packages; publishing requires an explicit
 workflow dispatch with `publish=true` or a `v*-kk.*` tag. The candidate tag is:
 
 ```text
-v4.145.0-kk.1
+v4.145.2-kk.4
 ```
 
 Expected assets per target:
 
 ```text
-code-server-4.145.0-kk.1-linux-amd64.tar.gz
-code-server-4.145.0-kk.1-linux-arm64.tar.gz
-code-server-4.145.0-kk.1-windows-amd64.tar.gz
-code-server-4.145.0-kk.1-macos-amd64.tar.gz
-code-server-4.145.0-kk.1-macos-arm64.tar.gz
+code-server-4.145.2-kk.4-linux-amd64.tar.gz
+code-server-4.145.2-kk.4-linux-arm64.tar.gz
+code-server-4.145.2-kk.4-windows-amd64.tar.gz
+code-server-4.145.2-kk.4-macos-amd64.tar.gz
+code-server-4.145.2-kk.4-macos-arm64.tar.gz
 ```
 
 Each archive has a `.sha256` file and a `-source.json` file. The publish job

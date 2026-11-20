@@ -1,0 +1,569 @@
+diff --git a/lib/vscode/src/vs/base/common/product.ts b/lib/vscode/src/vs/base/common/product.ts
+index 931ac9af..3e97df58 100644
+--- a/lib/vscode/src/vs/base/common/product.ts
++++ b/lib/vscode/src/vs/base/common/product.ts
+@@ -100,6 +100,7 @@ export interface IProductConfiguration {
+ 	readonly codeServerVersion?: string
+ 	readonly rootEndpoint?: string
+ 	readonly updateEndpoint?: string
++	readonly studioManagedView?: { readonly viewId: string; readonly bindingEpoch: string };
+ 	readonly logoutEndpoint?: string
+ 	readonly proxyEndpointTemplate?: string
+ 	readonly serviceWorker?: {
+diff --git a/lib/vscode/src/vs/code/browser/workbench/workbench.ts b/lib/vscode/src/vs/code/browser/workbench/workbench.ts
+index 6b69d7c3..e6bc1406 100644
+--- a/lib/vscode/src/vs/code/browser/workbench/workbench.ts
++++ b/lib/vscode/src/vs/code/browser/workbench/workbench.ts
+@@ -18,6 +18,7 @@ import { URI, UriComponents } from '../../../base/common/uri.js';
+ import product from '../../../platform/product/common/product.js';
+ import { ISecretStorageProvider } from '../../../platform/secrets/common/secrets.js';
+ import { isFolderToOpen, isWorkspaceToOpen } from '../../../platform/window/common/window.js';
++import { postStudioNativeAction } from '../../../workbench/browser/studioNativeActions.js';
+ import type { IWorkbenchConstructionOptions, IWorkspace, IWorkspaceProvider } from '../../../workbench/browser/web.api.js';
+ import { AuthenticationSessionInfo } from '../../../workbench/services/authentication/browser/authenticationService.js';
+ import { extractLocalHostUriMetaDataForPortMapping, TunnelOptions, TunnelCreationOptions } from '../../../platform/tunnel/common/tunnel.js';
+@@ -419,6 +420,14 @@ class WorkspaceProvider implements IWorkspaceProvider {
+ 	private static QUERY_PARAM_PAYLOAD = 'payload';
+ 
+ 	static create(config: IWorkbenchConstructionOptions & { folderUri?: UriComponents; workspaceUri?: UriComponents }) {
++		if (config.productConfiguration?.studioManagedView) {
++			const workspaceUri = URI.revive(config.workspaceUri);
++			if (!workspaceUri) {
++				throw new Error('Missing managed workspace URI');
++			}
++			return new WorkspaceProvider({ workspaceUri: workspaceUri.with({ authority: config.remoteAuthority }) }, Object.create(null), config);
++		}
++
+ 		let foundWorkspace = false;
+ 		let workspace: IWorkspace;
+ 		let payload = Object.create(null);
+@@ -493,6 +502,20 @@ class WorkspaceProvider implements IWorkspaceProvider {
+ 	}
+ 
+ 	async open(workspace: IWorkspace, options?: { reuse?: boolean; payload?: object }): Promise<boolean> {
++		const managedView = this.config.productConfiguration?.studioManagedView;
++		if (managedView) {
++			if (!workspace && !options?.reuse) {
++				postStudioNativeAction(managedView, { action: 'new-window' });
++			} else if (workspace && isFolderToOpen(workspace)) {
++				const folder = workspace.folderUri;
++				if (folder.scheme === Schemas.vscodeRemote && folder.authority === this.config.remoteAuthority) {
++					postStudioNativeAction(managedView, { action: 'open-folder', directory: folder.path });
++				}
++			}
++			// Never navigate or offer a pop-up retry for the current managed binding.
++			return true;
++		}
++
+ 		if (options?.reuse && !options.payload && this.isSame(this.workspace, workspace)) {
+ 			return true; // return early if workspace and environment is not changing and we are reusing window
+ 		}
+diff --git a/lib/vscode/src/vs/server/node/webClientServer.ts b/lib/vscode/src/vs/server/node/webClientServer.ts
+index e481e9af..5956cd77 100644
+--- a/lib/vscode/src/vs/server/node/webClientServer.ts
++++ b/lib/vscode/src/vs/server/node/webClientServer.ts
+@@ -406,6 +406,24 @@ export class WebClientServer {
+ 		const callbackRoute = posix.join(basePath, this._productPath, CALLBACK_PATH);
+ 
+ 		const resolveWorkspaceURI = (defaultLocation?: string) => defaultLocation && URI.file(resolve(defaultLocation)).with({ scheme: Schemas.vscodeRemote, authority: remoteAuthority });
++		let studioManagedView: IProductConfiguration['studioManagedView'];
++		let managedWorkspaceUri: URI | undefined;
++		if (managedView) {
++			const viewId = getFirstHeader('x-kk-view-id');
++			const bindingEpoch = getFirstHeader('x-kk-binding-epoch');
++			const encodedPath = getFirstHeader('x-kk-workspace-path');
++			if (!viewId || !bindingEpoch || !encodedPath) {
++				return serveError(req, res, 400, 'Missing managed workspace binding.');
++			}
++
++			studioManagedView = { viewId, bindingEpoch };
++			const file = URI.file(Buffer.from(encodedPath, 'base64url').toString('utf8'));
++			managedWorkspaceUri = URI.from({
++				scheme: Schemas.vscodeRemote,
++				authority: remoteAuthority,
++				path: file.authority ? `//${file.authority}${file.path}` : file.path,
++			});
++		}
+ 
+ 		const filePath = FileAccess.asFileUri(`vs/code/browser/workbench/workbench${this._environmentService.isBuilt ? '' : '-dev'}.html`).fsPath;
+ 		const authSessionInfo = !this._environmentService.isBuilt && this._environmentService.args['github-auth'] ? {
+@@ -451,6 +469,8 @@ export class WebClientServer {
+ 			} catch (err) {/* Ignore Error */ }
+ 		}
+ 
++		productConfiguration.studioManagedView = studioManagedView;
++
+ 		const workbenchWebConfiguration = {
+ 			remoteAuthority,
+ 			serverBasePath: basePath,
+@@ -465,8 +485,8 @@ export class WebClientServer {
+ 			settingsSyncOptions: !this._environmentService.isBuilt && this._environmentService.args['enable-sync'] ? { enabled: true } : undefined,
+ 			enableWorkspaceTrust: !this._environmentService.args['disable-workspace-trust'],
+ 			enabledExtensionProposedApi: this._environmentService.args['enable-proposed-api'],
+-			folderUri: resolveWorkspaceURI(this._environmentService.args['default-folder']),
+-			workspaceUri: resolveWorkspaceURI(this._environmentService.args['default-workspace']),
++			folderUri: managedView ? undefined : resolveWorkspaceURI(this._environmentService.args['default-folder']),
++			workspaceUri: managedView ? managedWorkspaceUri : resolveWorkspaceURI(this._environmentService.args['default-workspace']),
+ 			productConfiguration,
+ 			callbackRoute: callbackRoute,
+ 			remoteStorageEnabled: this._environmentService.args['enable-remote-storage'] ? true : undefined,
+diff --git a/lib/vscode/src/vs/workbench/api/browser/mainThreadWorkspace.ts b/lib/vscode/src/vs/workbench/api/browser/mainThreadWorkspace.ts
+index d147675f..bfd765d4 100644
+--- a/lib/vscode/src/vs/workbench/api/browser/mainThreadWorkspace.ts
++++ b/lib/vscode/src/vs/workbench/api/browser/mainThreadWorkspace.ts
+@@ -90,7 +90,7 @@ export class MainThreadWorkspace extends Disposable implements MainThreadWorkspa
+ 		// Indicate in status message
+ 		this._notificationService.status(this.getStatusMessage(extensionName, workspaceFoldersToAdd.length, deleteCount), { hideAfter: 10 * 1000 /* 10s */ });
+ 
+-		return this._workspaceEditingService.updateFolders(index, deleteCount, workspaceFoldersToAdd, true);
++		return this._workspaceEditingService.updateFolders(index, deleteCount, workspaceFoldersToAdd, true, 'extension');
+ 	}
+ 
+ 	private getStatusMessage(extensionName: string, addCount: number, removeCount: number): string {
+diff --git a/lib/vscode/src/vs/workbench/browser/actions/workspaceActions.ts b/lib/vscode/src/vs/workbench/browser/actions/workspaceActions.ts
+index 795ac6e0..0de81b4d 100644
+--- a/lib/vscode/src/vs/workbench/browser/actions/workspaceActions.ts
++++ b/lib/vscode/src/vs/workbench/browser/actions/workspaceActions.ts
+@@ -12,7 +12,7 @@ import { ICommandService } from '../../../platform/commands/common/commands.js';
+ import { ADD_ROOT_FOLDER_COMMAND_ID, ADD_ROOT_FOLDER_LABEL, PICK_WORKSPACE_FOLDER_COMMAND_ID, SET_ROOT_FOLDER_COMMAND_ID } from './workspaceCommands.js';
+ import { IFileDialogService } from '../../../platform/dialogs/common/dialogs.js';
+ import { MenuRegistry, MenuId, Action2, registerAction2 } from '../../../platform/actions/common/actions.js';
+-import { EmptyWorkspaceSupportContext, EnterMultiRootWorkspaceSupportContext, IsSessionsWindowContext, OpenFolderWorkspaceSupportContext, WorkbenchStateContext, WorkspaceFolderCountContext } from '../../common/contextkeys.js';
++import { EmptyWorkspaceSupportContext, EnterMultiRootWorkspaceSupportContext, IsSessionsWindowContext, IsStudioManagedContext, OpenFolderWorkspaceSupportContext, WorkbenchStateContext, WorkspaceFolderCountContext } from '../../common/contextkeys.js';
+ import { ServicesAccessor } from '../../../platform/instantiation/common/instantiation.js';
+ import { IHostService } from '../../services/host/browser/host.js';
+ import { KeyChord, KeyCode, KeyMod } from '../../../base/common/keyCodes.js';
+@@ -24,6 +24,9 @@ import { IsMacNativeContext } from '../../../platform/contextkey/common/contextk
+ import { ILocalizedString } from '../../../platform/action/common/action.js';
+ import { Categories } from '../../../platform/action/common/actionCommonCategories.js';
+ 
++import { IProductService } from '../../../platform/product/common/productService.js';
++import { postStudioNativeAction } from '../studioNativeActions.js';
++
+ const workspacesCategory: ILocalizedString = localize2('workspaces', 'Workspaces');
+ 
+ export class OpenFileAction extends Action2 {
+@@ -148,7 +151,7 @@ class OpenWorkspaceAction extends Action2 {
+ 			title: localize2('openWorkspaceAction', 'Open Workspace from File...'),
+ 			category: Categories.File,
+ 			f1: true,
+-			precondition: EnterMultiRootWorkspaceSupportContext
++			precondition: ContextKeyExpr.and(EnterMultiRootWorkspaceSupportContext, IsStudioManagedContext.negate())
+ 		});
+ 	}
+ 
+@@ -180,6 +183,11 @@ class CloseWorkspaceAction extends Action2 {
+ 	override async run(accessor: ServicesAccessor): Promise<void> {
+ 		const hostService = accessor.get(IHostService);
+ 		const environmentService = accessor.get(IWorkbenchEnvironmentService);
++		const managedView = accessor.get(IProductService).studioManagedView;
++		if (managedView) {
++			postStudioNativeAction(managedView, { action: 'close-workspace' });
++			return;
++		}
+ 
+ 		return hostService.openWindow({ forceReuseWindow: true, remoteAuthority: environmentService.remoteAuthority });
+ 	}
+@@ -220,7 +228,7 @@ export class AddRootFolderAction extends Action2 {
+ 			title: ADD_ROOT_FOLDER_LABEL,
+ 			category: workspacesCategory,
+ 			f1: true,
+-			precondition: ContextKeyExpr.and(ContextKeyExpr.or(EnterMultiRootWorkspaceSupportContext, WorkbenchStateContext.isEqualTo('workspace')), IsSessionsWindowContext.negate())
++			precondition: ContextKeyExpr.and(ContextKeyExpr.or(EnterMultiRootWorkspaceSupportContext, WorkbenchStateContext.isEqualTo('workspace')), IsSessionsWindowContext.negate(), IsStudioManagedContext.negate())
+ 		});
+ 	}
+ 
+@@ -241,7 +249,7 @@ export class RemoveRootFolderAction extends Action2 {
+ 			title: localize2('globalRemoveFolderFromWorkspace', 'Remove Folder from Workspace...'),
+ 			category: workspacesCategory,
+ 			f1: true,
+-			precondition: ContextKeyExpr.and(WorkspaceFolderCountContext.notEqualsTo('0'), ContextKeyExpr.or(EnterMultiRootWorkspaceSupportContext, WorkbenchStateContext.isEqualTo('workspace')), IsSessionsWindowContext.negate())
++			precondition: ContextKeyExpr.and(WorkspaceFolderCountContext.notEqualsTo('0'), ContextKeyExpr.or(EnterMultiRootWorkspaceSupportContext, WorkbenchStateContext.isEqualTo('workspace')), IsSessionsWindowContext.negate(), IsStudioManagedContext.negate())
+ 		});
+ 	}
+ 
+@@ -266,7 +274,7 @@ class SaveWorkspaceAsAction extends Action2 {
+ 			title: localize2('saveWorkspaceAsAction', 'Save Workspace As...'),
+ 			category: workspacesCategory,
+ 			f1: true,
+-			precondition: ContextKeyExpr.and(EnterMultiRootWorkspaceSupportContext, IsSessionsWindowContext.negate())
++			precondition: ContextKeyExpr.and(EnterMultiRootWorkspaceSupportContext, IsSessionsWindowContext.negate(), IsStudioManagedContext.negate())
+ 		});
+ 	}
+ 
+@@ -299,11 +307,14 @@ class DuplicateWorkspaceInNewWindowAction extends Action2 {
+ 			title: localize2('duplicateWorkspaceInNewWindow', 'Duplicate As Workspace in New Window'),
+ 			category: workspacesCategory,
+ 			f1: true,
+-			precondition: ContextKeyExpr.and(EnterMultiRootWorkspaceSupportContext, IsSessionsWindowContext.negate())
++			precondition: ContextKeyExpr.and(EnterMultiRootWorkspaceSupportContext, IsSessionsWindowContext.negate(), IsStudioManagedContext.negate())
+ 		});
+ 	}
+ 
+ 	override async run(accessor: ServicesAccessor): Promise<void> {
++		if (accessor.get(IProductService).studioManagedView) {
++			return;
++		}
+ 		const workspaceContextService = accessor.get(IWorkspaceContextService);
+ 		const workspaceEditingService = accessor.get(IWorkspaceEditingService);
+ 		const hostService = accessor.get(IHostService);
+@@ -383,7 +394,7 @@ MenuRegistry.appendMenuItem(MenuId.MenubarFileMenu, {
+ 		title: localize({ key: 'miOpenWorkspace', comment: ['&& denotes a mnemonic'] }, "Open Wor&&kspace from File...")
+ 	},
+ 	order: 3,
+-	when: EnterMultiRootWorkspaceSupportContext
++	when: ContextKeyExpr.and(EnterMultiRootWorkspaceSupportContext, IsStudioManagedContext.negate())
+ });
+ 
+ MenuRegistry.appendMenuItem(MenuId.MenubarFileMenu, {
+@@ -392,7 +403,7 @@ MenuRegistry.appendMenuItem(MenuId.MenubarFileMenu, {
+ 		id: ADD_ROOT_FOLDER_COMMAND_ID,
+ 		title: localize({ key: 'miAddFolderToWorkspace', comment: ['&& denotes a mnemonic'] }, "A&&dd Folder to Workspace...")
+ 	},
+-	when: ContextKeyExpr.and(ContextKeyExpr.or(EnterMultiRootWorkspaceSupportContext, WorkbenchStateContext.isEqualTo('workspace')), IsSessionsWindowContext.negate()),
++	when: ContextKeyExpr.and(ContextKeyExpr.or(EnterMultiRootWorkspaceSupportContext, WorkbenchStateContext.isEqualTo('workspace')), IsSessionsWindowContext.negate(), IsStudioManagedContext.negate()),
+ 	order: 1
+ });
+ 
+@@ -403,7 +414,7 @@ MenuRegistry.appendMenuItem(MenuId.MenubarFileMenu, {
+ 		title: localize('miSaveWorkspaceAs', "Save Workspace As...")
+ 	},
+ 	order: 2,
+-	when: ContextKeyExpr.and(EnterMultiRootWorkspaceSupportContext, IsSessionsWindowContext.negate())
++	when: ContextKeyExpr.and(EnterMultiRootWorkspaceSupportContext, IsSessionsWindowContext.negate(), IsStudioManagedContext.negate())
+ });
+ 
+ MenuRegistry.appendMenuItem(MenuId.MenubarFileMenu, {
+@@ -413,7 +424,7 @@ MenuRegistry.appendMenuItem(MenuId.MenubarFileMenu, {
+ 		title: localize('duplicateWorkspace', "Duplicate Workspace")
+ 	},
+ 	order: 3,
+-	when: ContextKeyExpr.and(EnterMultiRootWorkspaceSupportContext, IsSessionsWindowContext.negate())
++	when: ContextKeyExpr.and(EnterMultiRootWorkspaceSupportContext, IsSessionsWindowContext.negate(), IsStudioManagedContext.negate())
+ });
+ 
+ MenuRegistry.appendMenuItem(MenuId.MenubarFileMenu, {
+diff --git a/lib/vscode/src/vs/workbench/browser/client.ts b/lib/vscode/src/vs/workbench/browser/client.ts
+index 7948a7ba..5746968f 100644
+--- a/lib/vscode/src/vs/workbench/browser/client.ts
++++ b/lib/vscode/src/vs/workbench/browser/client.ts
+@@ -6,6 +6,7 @@ import { ILogService } from '../../platform/log/common/log.js';
+ import { INotificationService, Severity } from '../../platform/notification/common/notification.js';
+ import { IProductService } from '../../platform/product/common/productService.js';
+ import { IStorageService, StorageScope, StorageTarget } from '../../platform/storage/common/storage.js';
++import { postStudioNativeAction } from './studioNativeActions.js';
+ 
+ export class CodeServerClient extends Disposable {
+ 	static LOGOUT_COMMAND_ID = 'code-server.logout';
+@@ -86,8 +87,8 @@ export class CodeServerClient extends Disposable {
+ 			this.checkUpdates(this.productService.updateEndpoint)
+ 		}
+ 
+-		if (this.productService.logoutEndpoint) {
+-			this.addLogoutCommand(this.productService.logoutEndpoint);
++		if (this.productService.studioManagedView || this.productService.logoutEndpoint) {
++			this.addLogoutCommand();
+ 		}
+ 
+ 		if (this.productService.serviceWorker) {
+@@ -145,8 +146,16 @@ export class CodeServerClient extends Disposable {
+ 		updateLoop();
+ 	}
+ 
+-	private addLogoutCommand(logoutEndpoint: string) {
++	private addLogoutCommand() {
++		const { studioManagedView, logoutEndpoint } = this.productService;
+ 		CommandsRegistry.registerCommand(CodeServerClient.LOGOUT_COMMAND_ID, () => {
++			if (studioManagedView) {
++				postStudioNativeAction(studioManagedView, { action: 'close-workspace' });
++				return;
++			}
++			if (!logoutEndpoint) {
++				return;
++			}
+ 			const logoutUrl = new URL(logoutEndpoint, window.location.href);
+ 			// Cookies must be set with absolute paths and must use the same path to
+ 			// be unset (we set it on the root) so send the relative root and the
+@@ -160,7 +169,7 @@ export class CodeServerClient extends Disposable {
+ 			MenuRegistry.appendMenuItem(menuId, {
+ 				command: {
+ 					id: CodeServerClient.LOGOUT_COMMAND_ID,
+-					title: localize('logout', "Sign out of {0}", 'code-server'),
++					title: studioManagedView ? localize('studioCloseWorkspace', "Close This Workspace") : localize('logout', "Sign out of {0}", 'code-server'),
+ 				},
+ 			});
+ 		}
+diff --git a/lib/vscode/src/vs/workbench/browser/contextkeys.ts b/lib/vscode/src/vs/workbench/browser/contextkeys.ts
+index bd4521a0..bfc02592 100644
+--- a/lib/vscode/src/vs/workbench/browser/contextkeys.ts
++++ b/lib/vscode/src/vs/workbench/browser/contextkeys.ts
+@@ -6,7 +6,7 @@
+ import { Disposable } from '../../base/common/lifecycle.js';
+ import { IContextKeyService, IContextKey, setConstant as setConstantContextKey } from '../../platform/contextkey/common/contextkey.js';
+ import { IsMacContext, IsLinuxContext, IsWindowsContext, IsWebContext, IsMacNativeContext, IsDevelopmentContext, IsIOSContext, ProductQualityContext, IsMobileContext, IsChromeOSContext } from '../../platform/contextkey/common/contextkeys.js';
+-import { IsEnabledFileDownloads, IsEnabledFileUploads, IsEnabledCoderGettingStarted, SplitEditorsVertically, InEditorZenModeContext, AuxiliaryBarVisibleContext, SecondarySideBarVisibleContext, SideBarVisibleContext, PanelAlignmentContext, PanelMaximizedContext, PanelVisibleContext, EmbedderIdentifierContext, EditorTabsVisibleContext, IsMainEditorCenteredLayoutContext, MainEditorAreaVisibleContext, DirtyWorkingCopiesContext, EmptyWorkspaceSupportContext, EnterMultiRootWorkspaceSupportContext, HasWebFileSystemAccess, IsMainWindowFullscreenContext, OpenFolderWorkspaceSupportContext, RemoteNameContext, VirtualWorkspaceContext, WorkbenchStateContext, WorkspaceFolderCountContext, PanelPositionContext, TemporaryWorkspaceContext, TitleBarVisibleContext, TitleBarStyleContext, IsAuxiliaryWindowFocusedContext, ActiveEditorGroupEmptyContext, ActiveEditorGroupIndexContext, ActiveEditorGroupLastContext, ActiveEditorGroupLockedContext, MultipleEditorGroupsContext, EditorsVisibleContext, AuxiliaryBarMaximizedContext, InAutomationContext, IsSessionsWindowContext } from '../common/contextkeys.js';
++import { IsEnabledFileDownloads, IsEnabledFileUploads, IsEnabledCoderGettingStarted, SplitEditorsVertically, InEditorZenModeContext, AuxiliaryBarVisibleContext, SecondarySideBarVisibleContext, SideBarVisibleContext, PanelAlignmentContext, PanelMaximizedContext, PanelVisibleContext, EmbedderIdentifierContext, EditorTabsVisibleContext, IsMainEditorCenteredLayoutContext, MainEditorAreaVisibleContext, DirtyWorkingCopiesContext, EmptyWorkspaceSupportContext, EnterMultiRootWorkspaceSupportContext, HasWebFileSystemAccess, IsMainWindowFullscreenContext, OpenFolderWorkspaceSupportContext, RemoteNameContext, VirtualWorkspaceContext, WorkbenchStateContext, WorkspaceFolderCountContext, PanelPositionContext, TemporaryWorkspaceContext, TitleBarVisibleContext, TitleBarStyleContext, IsAuxiliaryWindowFocusedContext, ActiveEditorGroupEmptyContext, ActiveEditorGroupIndexContext, ActiveEditorGroupLastContext, ActiveEditorGroupLockedContext, MultipleEditorGroupsContext, EditorsVisibleContext, AuxiliaryBarMaximizedContext, InAutomationContext, IsSessionsWindowContext, IsStudioManagedContext } from '../common/contextkeys.js';
+ import { preferredSideBySideGroupDirection, GroupDirection, IEditorGroupsService } from '../services/editor/common/editorGroupsService.js';
+ import { IConfigurationService } from '../../platform/configuration/common/configuration.js';
+ import { IBrowserWorkbenchEnvironmentService } from '../services/environment/browser/environmentService.js';
+@@ -109,6 +109,7 @@ export class WorkbenchContextKeysHandler extends Disposable {
+ 		// Product Service
+ 		ProductQualityContext.bindTo(this.contextKeyService).set(this.productService.quality || '');
+ 		EmbedderIdentifierContext.bindTo(this.contextKeyService).set(productService.embedderIdentifier);
++		IsStudioManagedContext.bindTo(this.contextKeyService).set(!!productService.studioManagedView);
+ 
+ 		// Automation
+ 		this.inAutomationContext = InAutomationContext.bindTo(this.contextKeyService);
+diff --git a/lib/vscode/src/vs/workbench/browser/studioNativeActions.ts b/lib/vscode/src/vs/workbench/browser/studioNativeActions.ts
+new file mode 100644
+index 00000000..0350c597
+--- /dev/null
++++ b/lib/vscode/src/vs/workbench/browser/studioNativeActions.ts
+@@ -0,0 +1,15 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { mainWindow } from '../../base/browser/window.js';
++import type { IProductConfiguration } from '../../base/common/product.js';
++
++type NativeAction = { action: 'open-folder'; directory: string } | { action: 'new-window' | 'close-workspace' };
++
++export function postStudioNativeAction(view: NonNullable<IProductConfiguration['studioManagedView']>, action: NativeAction): void {
++	if (mainWindow.parent !== mainWindow) {
++		mainWindow.parent.postMessage({ type: 'kk-studio.ide.native-action', ...view, ...action }, mainWindow.location.origin);
++	}
++}
+diff --git a/lib/vscode/src/vs/workbench/common/contextkeys.ts b/lib/vscode/src/vs/workbench/common/contextkeys.ts
+index 08038223..015e4e17 100644
+--- a/lib/vscode/src/vs/workbench/common/contextkeys.ts
++++ b/lib/vscode/src/vs/workbench/common/contextkeys.ts
+@@ -38,6 +38,7 @@ export const IsSessionsWindowContext = new RawContextKey<boolean>('isSessionsWin
+ 
+ export const HasWebFileSystemAccess = new RawContextKey<boolean>('hasWebFileSystemAccess', false, true); // Support for FileSystemAccess web APIs (https://wicg.github.io/file-system-access)
+ 
++export const IsStudioManagedContext = new RawContextKey<boolean>('isStudioManaged', false);
+ export const EmbedderIdentifierContext = new RawContextKey<string | undefined>('embedderIdentifier', undefined, localize('embedderIdentifier', 'The identifier of the embedder according to the product service, if one is defined'));
+ 
+ export const InAutomationContext = new RawContextKey<boolean>('inAutomation', false, localize('inAutomation', "Whether VS Code is running under automation/smoke test"));
+diff --git a/lib/vscode/src/vs/workbench/contrib/files/browser/explorerViewlet.ts b/lib/vscode/src/vs/workbench/contrib/files/browser/explorerViewlet.ts
+index 565fb42c..9a2adf12 100644
+--- a/lib/vscode/src/vs/workbench/contrib/files/browser/explorerViewlet.ts
++++ b/lib/vscode/src/vs/workbench/contrib/files/browser/explorerViewlet.ts
+@@ -30,7 +30,7 @@ import { KeyChord, KeyMod, KeyCode } from '../../../../base/common/keyCodes.js';
+ import { Registry } from '../../../../platform/registry/common/platform.js';
+ import { IProgressService, ProgressLocation } from '../../../../platform/progress/common/progress.js';
+ import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
+-import { WorkbenchStateContext, RemoteNameContext, OpenFolderWorkspaceSupportContext } from '../../../common/contextkeys.js';
++import { WorkbenchStateContext, RemoteNameContext, OpenFolderWorkspaceSupportContext, IsStudioManagedContext } from '../../../common/contextkeys.js';
+ import { IsWebContext } from '../../../../platform/contextkey/common/contextkeys.js';
+ import { AddRootFolderAction, OpenFolderAction, OpenFolderViaWorkspaceAction } from '../../../browser/actions/workspaceActions.js';
+ import { OpenRecentAction } from '../../../browser/actions/windowActions.js';
+@@ -284,6 +284,12 @@ const openFolderViaWorkspaceButton = `[${openFolder}](command:${OpenFolderViaWor
+ const openRecentButton = `[${openRecent}](command:${OpenRecentAction.ID})`;
+ 
+ const viewsRegistry = Registry.as<IViewsRegistry>(Extensions.ViewsRegistry);
++viewsRegistry.registerViewWelcomeContent(EmptyView.ID, {
++	content: openFolderButton,
++	when: IsStudioManagedContext,
++	group: ViewContentGroups.Open,
++	order: 1
++});
+ viewsRegistry.registerViewWelcomeContent(EmptyView.ID, {
+ 	content: localize({ key: 'noWorkspaceHelp', comment: ['Please do not translate the word "command", it is part of our internal syntax which must not change'] },
+ 		"You have not yet added a folder to the workspace.\n{0}", addRootFolderButton),
+@@ -291,7 +297,8 @@ viewsRegistry.registerViewWelcomeContent(EmptyView.ID, {
+ 		// inside a .code-workspace
+ 		WorkbenchStateContext.isEqualTo('workspace'),
+ 		// unless we cannot enter or open workspaces (e.g. web serverless)
+-		OpenFolderWorkspaceSupportContext
++		OpenFolderWorkspaceSupportContext,
++		IsStudioManagedContext.negate()
+ 	),
+ 	group: ViewContentGroups.Open,
+ 	order: 1
+diff --git a/lib/vscode/src/vs/workbench/contrib/files/browser/fileActions.contribution.ts b/lib/vscode/src/vs/workbench/contrib/files/browser/fileActions.contribution.ts
+index 449958cb..4f2ec345 100644
+--- a/lib/vscode/src/vs/workbench/contrib/files/browser/fileActions.contribution.ts
++++ b/lib/vscode/src/vs/workbench/contrib/files/browser/fileActions.contribution.ts
+@@ -20,7 +20,7 @@ import { CLOSE_SAVED_EDITORS_COMMAND_ID, CLOSE_EDITORS_IN_GROUP_COMMAND_ID, CLOS
+ import { AutoSaveAfterShortDelayContext } from '../../../services/filesConfiguration/common/filesConfigurationService.js';
+ import { WorkbenchListDoubleSelection } from '../../../../platform/list/browser/listService.js';
+ import { Schemas } from '../../../../base/common/network.js';
+-import { IsEnabledFileDownloads, IsEnabledFileUploads, DirtyWorkingCopiesContext, EnterMultiRootWorkspaceSupportContext, HasWebFileSystemAccess, IsSessionsWindowContext, WorkbenchStateContext, WorkspaceFolderCountContext, SidebarFocusContext, ActiveEditorCanRevertContext, ActiveEditorContext, ActiveEditorDirtyContext, ResourceContextKey, ActiveEditorAvailableEditorIdsContext, MultipleEditorsSelectedInGroupContext, TwoEditorsSelectedInGroupContext, SelectedEditorsInGroupFileOrUntitledResourceContextKey } from '../../../common/contextkeys.js';
++import { IsEnabledFileDownloads, IsEnabledFileUploads, DirtyWorkingCopiesContext, EnterMultiRootWorkspaceSupportContext, HasWebFileSystemAccess, IsSessionsWindowContext, IsStudioManagedContext, WorkbenchStateContext, WorkspaceFolderCountContext, SidebarFocusContext, ActiveEditorCanRevertContext, ActiveEditorContext, ActiveEditorDirtyContext, ResourceContextKey, ActiveEditorAvailableEditorIdsContext, MultipleEditorsSelectedInGroupContext, TwoEditorsSelectedInGroupContext, SelectedEditorsInGroupFileOrUntitledResourceContextKey } from '../../../common/contextkeys.js';
+ import { IsWebContext } from '../../../../platform/contextkey/common/contextkeys.js';
+ import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+ import { ThemeIcon } from '../../../../base/common/themables.js';
+@@ -625,7 +625,7 @@ MenuRegistry.appendMenuItem(MenuId.ExplorerContext, {
+ 		id: ADD_ROOT_FOLDER_COMMAND_ID,
+ 		title: ADD_ROOT_FOLDER_LABEL,
+ 	},
+-	when: ContextKeyExpr.and(ExplorerRootContext, ContextKeyExpr.or(EnterMultiRootWorkspaceSupportContext, WorkbenchStateContext.isEqualTo('workspace')))
++	when: ContextKeyExpr.and(IsStudioManagedContext.negate(), ExplorerRootContext, ContextKeyExpr.or(EnterMultiRootWorkspaceSupportContext, WorkbenchStateContext.isEqualTo('workspace')))
+ });
+ 
+ MenuRegistry.appendMenuItem(MenuId.ExplorerContext, {
+@@ -635,7 +635,7 @@ MenuRegistry.appendMenuItem(MenuId.ExplorerContext, {
+ 		id: REMOVE_ROOT_FOLDER_COMMAND_ID,
+ 		title: REMOVE_ROOT_FOLDER_LABEL,
+ 	},
+-	when: ContextKeyExpr.and(ExplorerRootContext, ExplorerFolderContext, ContextKeyExpr.and(WorkspaceFolderCountContext.notEqualsTo('0'), ContextKeyExpr.or(EnterMultiRootWorkspaceSupportContext, WorkbenchStateContext.isEqualTo('workspace'))))
++	when: ContextKeyExpr.and(IsStudioManagedContext.negate(), ExplorerRootContext, ExplorerFolderContext, ContextKeyExpr.and(WorkspaceFolderCountContext.notEqualsTo('0'), ContextKeyExpr.or(EnterMultiRootWorkspaceSupportContext, WorkbenchStateContext.isEqualTo('workspace'))))
+ });
+ 
+ MenuRegistry.appendMenuItem(MenuId.ExplorerContext, {
+diff --git a/lib/vscode/src/vs/workbench/services/host/browser/browserHostService.ts b/lib/vscode/src/vs/workbench/services/host/browser/browserHostService.ts
+index 4d7537ca..0ddf7c71 100644
+--- a/lib/vscode/src/vs/workbench/services/host/browser/browserHostService.ts
++++ b/lib/vscode/src/vs/workbench/services/host/browser/browserHostService.ts
+@@ -463,6 +463,9 @@ export class BrowserHostService extends Disposable implements IHostService {
+ 	}
+ 
+ 	private shouldReuse(options: IOpenWindowOptions = Object.create(null), isFile: boolean): boolean {
++		if (isFile && this.environmentService.options?.productConfiguration?.studioManagedView) {
++			return true; // managed file opens never create a Studio tab
++		}
+ 		if (options.waitMarkerFileURI) {
+ 			return true; // always handle --wait in same window
+ 		}
+@@ -487,6 +490,12 @@ export class BrowserHostService extends Disposable implements IHostService {
+ 
+ 	private async doOpen(workspace: IWorkspace, options?: { reuse?: boolean; payload?: object }): Promise<void> {
+ 
++		if (this.environmentService.options?.productConfiguration?.studioManagedView) {
++			// Studio owns the transition; this workbench is not shutting down.
++			await this.workspaceProvider.open(workspace, options);
++			return;
++		}
++
+ 		// When we are in a temporary workspace and are asked to open a local folder
+ 		// we swap that folder into the workspace to avoid a window reload. Access
+ 		// to local resources is only possible without a window reload because it
+diff --git a/lib/vscode/src/vs/workbench/services/workspaces/browser/abstractWorkspaceEditingService.ts b/lib/vscode/src/vs/workbench/services/workspaces/browser/abstractWorkspaceEditingService.ts
+index 1c1d6308..4709ef87 100644
+--- a/lib/vscode/src/vs/workbench/services/workspaces/browser/abstractWorkspaceEditingService.ts
++++ b/lib/vscode/src/vs/workbench/services/workspaces/browser/abstractWorkspaceEditingService.ts
+@@ -124,7 +124,14 @@ export abstract class AbstractWorkspaceEditingService extends Disposable impleme
+ 		return `workspace.${WORKSPACE_EXTENSION}`;
+ 	}
+ 
+-	async updateFolders(index: number, deleteCount?: number, foldersToAddCandidates?: IWorkspaceFolderCreationData[], donotNotifyError?: boolean): Promise<void> {
++	protected get studioManagesWorkspace(): boolean {
++		return false;
++	}
++
++	async updateFolders(index: number, deleteCount?: number, foldersToAddCandidates?: IWorkspaceFolderCreationData[], donotNotifyError?: boolean, source?: 'extension'): Promise<void> {
++		if (this.studioManagesWorkspace && source !== 'extension') {
++			return;
++		}
+ 		const folders = this.contextService.getWorkspace().folders;
+ 
+ 		let foldersToDelete: URI[] = [];
+@@ -151,7 +158,7 @@ export abstract class AbstractWorkspaceEditingService extends Disposable impleme
+ 
+ 		// Delete Folders
+ 		if (wantsToDelete && !wantsToAdd) {
+-			return this.removeFolders(foldersToDelete);
++			return this.studioManagesWorkspace ? this.doRemoveFolders(foldersToDelete, donotNotifyError) : this.removeFolders(foldersToDelete);
+ 		}
+ 
+ 		// Add & Delete Folders
+@@ -188,6 +195,10 @@ export abstract class AbstractWorkspaceEditingService extends Disposable impleme
+ 
+ 	addFolders(foldersToAddCandidates: IWorkspaceFolderCreationData[], donotNotifyError = false): Promise<void> {
+ 
++		if (this.studioManagesWorkspace) {
++			return Promise.resolve();
++		}
++
+ 		// Normalize
+ 		const foldersToAdd = foldersToAddCandidates.map(folderToAdd => ({ uri: removeTrailingPathSeparator(folderToAdd.uri), name: folderToAdd.name }));
+ 
+@@ -229,6 +240,12 @@ export abstract class AbstractWorkspaceEditingService extends Disposable impleme
+ 	}
+ 
+ 	async removeFolders(foldersToRemove: URI[], donotNotifyError = false): Promise<void> {
++		if (!this.studioManagesWorkspace) {
++			await this.doRemoveFolders(foldersToRemove, donotNotifyError);
++		}
++	}
++
++	private async doRemoveFolders(foldersToRemove: URI[], donotNotifyError = false): Promise<void> {
+ 
+ 		// If we are in single-folder state and the opened folder is to be removed,
+ 		// we create an empty workspace and enter it.
+@@ -258,7 +275,7 @@ export abstract class AbstractWorkspaceEditingService extends Disposable impleme
+ 	}
+ 
+ 	async createAndEnterWorkspace(folders: IWorkspaceFolderCreationData[], path?: URI): Promise<void> {
+-		if (path && !await this.isValidTargetWorkspacePath(path)) {
++		if (this.studioManagesWorkspace || (path && !await this.isValidTargetWorkspacePath(path))) {
+ 			return;
+ 		}
+ 
+@@ -281,6 +298,9 @@ export abstract class AbstractWorkspaceEditingService extends Disposable impleme
+ 	}
+ 
+ 	async saveAndEnterWorkspace(workspaceUri: URI): Promise<void> {
++		if (this.studioManagesWorkspace) {
++			return;
++		}
+ 		const workspaceIdentifier = this.getCurrentWorkspaceIdentifier();
+ 		if (!workspaceIdentifier) {
+ 			return;
+diff --git a/lib/vscode/src/vs/workbench/services/workspaces/browser/workspaceEditingService.ts b/lib/vscode/src/vs/workbench/services/workspaces/browser/workspaceEditingService.ts
+index 9b1b35ab..1721493c 100644
+--- a/lib/vscode/src/vs/workbench/services/workspaces/browser/workspaceEditingService.ts
++++ b/lib/vscode/src/vs/workbench/services/workspaces/browser/workspaceEditingService.ts
+@@ -10,7 +10,7 @@ import { WorkspaceService } from '../../configuration/browser/configurationServi
+ import { ICommandService } from '../../../../platform/commands/common/commands.js';
+ import { INotificationService } from '../../../../platform/notification/common/notification.js';
+ import { IFileService } from '../../../../platform/files/common/files.js';
+-import { IWorkbenchEnvironmentService } from '../../environment/common/environmentService.js';
++import { IBrowserWorkbenchEnvironmentService } from '../../environment/browser/environmentService.js';
+ import { IFileDialogService, IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+ import { ITextFileService } from '../../textfile/common/textfiles.js';
+ import { IHostService } from '../../host/browser/host.js';
+@@ -36,7 +36,7 @@ export class BrowserWorkspaceEditingService extends AbstractWorkspaceEditingServ
+ 		@IFileService fileService: IFileService,
+ 		@ITextFileService textFileService: ITextFileService,
+ 		@IWorkspacesService workspacesService: IWorkspacesService,
+-		@IWorkbenchEnvironmentService environmentService: IWorkbenchEnvironmentService,
++		@IBrowserWorkbenchEnvironmentService private readonly browserEnvironmentService: IBrowserWorkbenchEnvironmentService,
+ 		@IFileDialogService fileDialogService: IFileDialogService,
+ 		@IDialogService dialogService: IDialogService,
+ 		@IHostService hostService: IHostService,
+@@ -46,10 +46,17 @@ export class BrowserWorkspaceEditingService extends AbstractWorkspaceEditingServ
+ 		@IUserDataProfileService userDataProfileService: IUserDataProfileService,
+ 		@ILogService logService: ILogService,
+ 	) {
+-		super(jsonEditingService, contextService, configurationService, notificationService, commandService, fileService, textFileService, workspacesService, environmentService, fileDialogService, dialogService, hostService, uriIdentityService, workspaceTrustManagementService, userDataProfilesService, userDataProfileService, logService);
++		super(jsonEditingService, contextService, configurationService, notificationService, commandService, fileService, textFileService, workspacesService, browserEnvironmentService, fileDialogService, dialogService, hostService, uriIdentityService, workspaceTrustManagementService, userDataProfilesService, userDataProfileService, logService);
++	}
++
++	protected override get studioManagesWorkspace(): boolean {
++		return !!this.browserEnvironmentService.options?.productConfiguration?.studioManagedView;
+ 	}
+ 
+ 	async enterWorkspace(workspaceUri: URI): Promise<void> {
++		if (this.studioManagesWorkspace) {
++			return;
++		}
+ 		const oldWorkspace = toWorkspaceIdentifier(this.contextService.getWorkspace());
+ 		const result = await this.doEnterWorkspace(workspaceUri);
+ 		if (result) {
+diff --git a/lib/vscode/src/vs/workbench/services/workspaces/common/workspaceEditing.ts b/lib/vscode/src/vs/workbench/services/workspaces/common/workspaceEditing.ts
+index 9169fc79..b71ca6ce 100644
+--- a/lib/vscode/src/vs/workbench/services/workspaces/common/workspaceEditing.ts
++++ b/lib/vscode/src/vs/workbench/services/workspaces/common/workspaceEditing.ts
+@@ -50,7 +50,7 @@ export interface IWorkspaceEditingService {
+ 	 * Allows to add and remove folders to the existing workspace at once.
+ 	 * When `donotNotifyError` is `true`, error will be bubbled up otherwise, the service handles the error with proper message and action
+ 	 */
+-	updateFolders(index: number, deleteCount?: number, foldersToAdd?: IWorkspaceFolderCreationData[], donotNotifyError?: boolean): Promise<void>;
++	updateFolders(index: number, deleteCount?: number, foldersToAdd?: IWorkspaceFolderCreationData[], donotNotifyError?: boolean, source?: 'extension'): Promise<void>;
+ 
+ 	/**
+ 	 * Enters the workspace with the provided path.

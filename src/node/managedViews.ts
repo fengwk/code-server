@@ -276,17 +276,10 @@ export async function canonicalWorkspacePath(value: string): Promise<string> {
   } catch {
     throw new ManagedViewError(400, "WORKSPACE_NOT_FOUND", "workspacePath does not exist")
   }
-  if (stat.isDirectory()) {
-    return resolved
-  }
   if (stat.isFile() && path.extname(resolved) === ".code-workspace") {
     return resolved
   }
-  throw new ManagedViewError(
-    400,
-    "INVALID_WORKSPACE_PATH",
-    "workspacePath must be a directory or a .code-workspace file",
-  )
+  throw new ManagedViewError(400, "INVALID_WORKSPACE_PATH", "workspacePath must be a .code-workspace file")
 }
 
 function draftBackup() {
@@ -380,8 +373,12 @@ export class ManagedViewManager {
   }
 
   isOpen(viewId: string, bindingEpoch: string): boolean {
+    return this.openWorkspacePath(viewId, bindingEpoch) !== undefined
+  }
+
+  openWorkspacePath(viewId: string, bindingEpoch: string): string | undefined {
     const view = this.active.get(viewId)
-    return view !== undefined && view.state === "OPEN" && view.bindingEpoch === bindingEpoch
+    return view?.state === "OPEN" && view.bindingEpoch === bindingEpoch ? view.workspacePath : undefined
   }
 
   hasView(viewId: string): boolean {

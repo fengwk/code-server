@@ -197,7 +197,8 @@ export function createViewRouters(manager: ManagedViewManager): ManagedViewRoute
         return
       }
       const params = managedViewParams(req)
-      if (!manager.isOpen(params.viewId, params.bindingEpoch)) {
+      const workspacePath = manager.openWorkspacePath(params.viewId, params.bindingEpoch)
+      if (workspacePath === undefined) {
         const state = manager.hasView(params.viewId) ? "VIEW_EPOCH_MISMATCH" : "VIEW_NOT_FOUND"
         throw new ManagedViewError(410, state, "view is not open for this binding epoch")
       }
@@ -205,6 +206,7 @@ export function createViewRouters(manager: ManagedViewManager): ManagedViewRoute
         throw new ManagedViewError(410, "VIEW_CLOSING", "view is closing")
       }
       applyManagedViewHeaders(req, params)
+      req.headers["x-kk-workspace-path"] = Buffer.from(workspacePath, "utf8").toString("base64url")
       next()
     } catch (error) {
       if (error instanceof ManagedViewError) {

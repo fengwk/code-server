@@ -98,6 +98,7 @@ export const register = async (
     delete req.headers["x-kk-view-id"]
     delete req.headers["x-kk-binding-epoch"]
     delete req.headers["x-kk-managed-view-base"]
+    delete req.headers["x-kk-workspace-path"]
     next()
   }
   app.router.use(stripManagedViewHeaders)

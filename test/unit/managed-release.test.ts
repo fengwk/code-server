@@ -25,11 +25,11 @@ describe("managed release", () => {
 
   // The candidate version is fixed in one place: dispatch and tag publishes
   // must agree, and the source metadata keeps the upstream Code tag separate.
-  it("targets the 4.145.2-kk.3 candidate without replacing the previous tag", () => {
-    assert.equal(workflow.match(/4\.145\.2-kk\.3/g)?.length, 2)
+  it("targets the 4.145.2-kk.4 candidate without replacing the previous tag", () => {
+    assert.equal(workflow.match(/4\.145\.2-kk\.4/g)?.length, 2)
     assert.doesNotMatch(workflow, /4\.145\.2-kk\.1/)
     assert.ok(workflow.includes('--arg upstreamTag "v4.145.2"'))
-    assert.ok(workflow.includes("tag=v4.145.2-kk.3"))
+    assert.ok(workflow.includes("tag=v4.145.2-kk.4"))
   })
 
   // A managed-view patch that misses a VS Code file leaves the built server
@@ -40,9 +40,15 @@ describe("managed release", () => {
       .readFileSync(path.join(root, "patches/series"), "utf8")
       .split("\n")
       .filter((line) => line.length > 0)
-    assert.equal(series.length, 33)
+    assert.equal(series.length, 34)
     assert.equal(new Set(series).size, series.length)
-    assert.deepEqual(series.slice(-4), ["csp-hashes.diff", "managed-runtime.diff", "managed-views.diff", "managed-workbench.diff"])
+    assert.deepEqual(series.slice(-5), [
+      "csp-hashes.diff",
+      "managed-runtime.diff",
+      "managed-views.diff",
+      "managed-workbench.diff",
+      "studio-native-actions.diff",
+    ])
     const patch = fs.readFileSync(path.join(root, "patches/managed-views.diff"), "utf8")
     for (const file of [
       "src/vs/base/parts/ipc/common/ipc.ts",
