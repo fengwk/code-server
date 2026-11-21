@@ -45,26 +45,19 @@ describe("managed workspaces", ["--disable-workspace-trust", "--auth", "password
       // the observable ready condition for accepting the user's path.
       const expectedSuggestion = path.join(root, folder, text)
       const suggestionName = path.basename(expectedSuggestion)
-      const readSaveInput = () =>
-        input.evaluate((element) => {
-          const field = element as HTMLInputElement
-          return {
-            value: field.value,
-            selectionStart: field.selectionStart,
-            selectionEnd: field.selectionEnd,
-          }
-        })
       await expect
-        .poll(async () => {
-          const state = await readSaveInput()
-          return {
-            folder: path.dirname(state.value),
-            value: state.value,
-            selection: [state.selectionStart, state.selectionEnd],
-          }
-        })
+        .poll(() =>
+          input.evaluate((element) => {
+            const field = element as HTMLInputElement
+            return {
+              focused: field === field.ownerDocument.activeElement,
+              value: field.value,
+              selection: [field.selectionStart, field.selectionEnd],
+            }
+          }),
+        )
         .toEqual({
-          folder: path.join(root, folder),
+          focused: true,
           value: expectedSuggestion,
           selection: [
             expectedSuggestion.length - suggestionName.length,
@@ -73,14 +66,17 @@ describe("managed workspaces", ["--disable-workspace-trust", "--auth", "password
         })
 
       const target = path.join(root, folder, "saved.txt")
-      await input.fill(target)
+      // Replace the selected name in place and use Quick Input's Enter binding
+      // without moving focus to the OK button or changing the current folder.
+      await codeServerPage.page.keyboard.insertText(path.basename(target))
       await expect(input).toHaveValue(target)
-      await dialog.getByRole("button", { name: "OK", exact: true }).click()
-      await expect(input).toBeHidden()
+      await expect(input).toBeFocused()
+      await codeServerPage.page.keyboard.press("Enter")
+      await expect(dialog).toBeHidden()
       await expect
         .poll(async () => {
           try {
-            return await fs.readFile(path.join(root, folder, "saved.txt"), "utf8")
+            return await fs.readFile(target, "utf8")
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code === "ENOENT") {
               return undefined
