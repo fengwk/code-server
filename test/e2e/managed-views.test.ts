@@ -176,7 +176,7 @@ describe(
       const address = await codeServer.address()
       const root = await codeServer.workspaceDir
       const directory = path.join(root, "selected%2F目录")
-      await fs.mkdir(path.join(directory, "picker-ready"), { recursive: true })
+      await fs.mkdir(directory)
       const workspace = path.join(root, "registered%2F空.code-workspace")
       const otherWorkspace = path.join(root, "other.code-workspace")
       const emptyWorkspace = JSON.stringify({ folders: [] })
@@ -225,7 +225,8 @@ describe(
         await workbench.locator(".monaco-workbench").press("Control+Shift+P")
         await expect(input).toBeVisible()
         await input.fill(`>${title}`)
-        await quickInput.getByText(title, { exact: true }).click()
+        const label = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        await quickInput.locator("a").filter({ hasText: new RegExp(`^${label}$`) }).click()
       }
       // Verify the effective client workspace, not only the injected server config.
       await runCommand("Workspaces: Open Workspace Configuration File")
@@ -235,8 +236,12 @@ describe(
       page.on("popup", (popup) => popupUrls.push(popup.url()))
       await openFolder.click()
       await expect(quickInput.locator(".quick-input-title")).toHaveText("Open Folder")
-      await input.fill(`${directory}${path.sep}`)
-      await expect(quickInput.getByText("picker-ready", { exact: true })).toBeVisible()
+      await expect(quickInput.getByText("..", { exact: true })).toBeVisible()
+      await input.fill(`${root}${path.sep}`)
+      const targetFolder = quickInput.getByText(path.basename(directory), { exact: true })
+      await targetFolder.click()
+      await expect(input).toHaveValue(`${directory}${path.sep}`)
+      await expect(targetFolder).toBeHidden()
       await quickInput.getByRole("button", { name: "OK", exact: true }).click()
       const actionBase = { type: "kk-studio.ide.native-action", viewId: VIEW_A, bindingEpoch: "1" }
       await expect.poll(() => messages.length).toBe(1)
