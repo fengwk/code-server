@@ -4,7 +4,7 @@ Index: code-server/lib/vscode/build/gulpfile.reh.ts
 ===================================================================
 --- code-server.orig/lib/vscode/build/gulpfile.reh.ts
 +++ code-server/lib/vscode/build/gulpfile.reh.ts
-@@ -23,14 +23,14 @@ import glob from 'glob';
+@@ -23,15 +23,15 @@ import glob from 'glob';
  import { promisify } from 'util';
  import rceditCallback from 'rcedit';
  import { compileApiProposalNamesTask, copyCodiconsTask } from './lib/compilation.ts';
@@ -19,6 +19,7 @@ Index: code-server/lib/vscode/build/gulpfile.reh.ts
 -import { ensureCopilotPlatformPackage, getCopilotExcludeFilter, getCopilotRuntimePrebuildFiles, getCopilotTgrepExcludeFilter, getRipgrepExcludeFilter, prepareBuiltInCopilotRipgrepShim } from './lib/copilot.ts';
 +import { getRipgrepExcludeFilter } from './lib/copilot.ts';
  import { readAgentSdkResults } from './agent-sdk/common.ts';
+ import { getServerNodeVersion } from './lib/node.ts';
  
  
 @@ -293,7 +293,7 @@ function packageTask(type: string, platform: string, arch: string, sourceFolderN

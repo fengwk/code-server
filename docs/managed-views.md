@@ -1,6 +1,6 @@
 # Managed views
 
-This fork (`4.145.2-kk.4` candidate) exposes isolated code-server views to
+This fork (`4.146.0-kk.1` candidate) exposes isolated code-server views to
 the KK Studio daemon. A view is a browser workbench bound to one workspace,
 binding epoch, extension host, terminal set and management connection.
 
@@ -103,15 +103,25 @@ With the VS Code submodule checked out and patches applied as described in the
 [development workflow](CONTRIBUTING.md#development-workflow):
 
 ```bash
-# Node 24 is required by .node-version and lib/vscode/.nvmrc.
+# Use the Node version in .node-version and pnpm version in package.json.
 nvm use
-npm ci
-export VERSION=4.145.2-kk.4
-npm run build
-npm run build:vscode
-KEEP_MODULES=1 npm run release
-npm --prefix test ci
-CODE_SERVER_TEST_ENTRY="$PWD/release" npm run test:e2e -- \
+(cd lib/vscode/build && CI=1 pnpm install --frozen-lockfile)
+(
+  cd lib/vscode
+  if [[ $(uname -sm) == 'Linux x86_64' ]]; then
+    export VSCODE_ARCH=x64 npm_config_arch=x64
+    source ./build/azure-pipelines/linux/setup-env.sh
+  fi
+  pnpm run preinstall
+  CI=1 pnpm install --frozen-lockfile
+)
+CI=1 SKIP_SUBMODULE_DEPS=1 pnpm install --frozen-lockfile
+export VERSION=4.146.0-kk.1
+pnpm run build
+pnpm run build:vscode
+KEEP_MODULES=1 pnpm run release
+./test/node_modules/.bin/playwright install chromium
+CODE_SERVER_TEST_ENTRY="$PWD/release" pnpm run test:e2e \
   --project Chromium --retries 0 e2e/managed-workspaces.test.ts e2e/managed-views.test.ts
 ```
 
@@ -120,7 +130,7 @@ VS Code node test:
 
 ```bash
 cd lib/vscode
-npm run gulp core-ci
+pnpm run gulp core-ci
 node test/unit/node/index.js --build \
   --run out-build/vs/server/test/node/managedViews.test.ts --timeout 30000
 ```
@@ -139,17 +149,24 @@ push to `kk-studio` builds all five packages; publishing requires an explicit
 workflow dispatch with `publish=true` or a `v*-kk.*` tag. The candidate tag is:
 
 ```text
-v4.145.2-kk.4
+v4.146.0-kk.1
 ```
+
+To validate without releasing, dispatch the workflow with `publish=false`.
+Check all five native builds, including the managed-view node suite, native
+module loading, and Copilot exclusion. Both Linux targets must pass the workspace
+snapshot browser suite, and Linux AMD64 must pass the managed workspace and view
+smoke tests against its packaged build. Confirm that each target uploads its
+archive, checksum, and source metadata.
 
 Expected assets per target:
 
 ```text
-code-server-4.145.2-kk.4-linux-amd64.tar.gz
-code-server-4.145.2-kk.4-linux-arm64.tar.gz
-code-server-4.145.2-kk.4-windows-amd64.tar.gz
-code-server-4.145.2-kk.4-macos-amd64.tar.gz
-code-server-4.145.2-kk.4-macos-arm64.tar.gz
+code-server-4.146.0-kk.1-linux-amd64.tar.gz
+code-server-4.146.0-kk.1-linux-arm64.tar.gz
+code-server-4.146.0-kk.1-windows-amd64.tar.gz
+code-server-4.146.0-kk.1-macos-amd64.tar.gz
+code-server-4.146.0-kk.1-macos-arm64.tar.gz
 ```
 
 Each archive has a `.sha256` file and a `-source.json` file. The publish job

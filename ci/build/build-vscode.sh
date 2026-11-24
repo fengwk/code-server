@@ -54,7 +54,7 @@ main() {
 
   if [[ ! ${VERSION-} ]]; then
     echo "VERSION not set. Please set before running this script:"
-    echo "VERSION='0.0.0' npm run build:vscode"
+    echo "VERSION='0.0.0' pnpm run build:vscode"
     exit 1
   fi
 
@@ -118,9 +118,8 @@ main() {
 EOF
   ) > product.json
 
-
-  npm run gulp core-ci
-  npm run gulp "vscode-reh-web-$VSCODE_TARGET${MINIFY:+-min}-ci"
+  pnpm run gulp core-ci
+  pnpm run gulp "vscode-reh-web-$VSCODE_TARGET${MINIFY:+-min}-ci"
 
   # The source build must keep the editor extensions and must not ship the
   # built-in Copilot extension or its dedicated packaging output.

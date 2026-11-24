@@ -23,13 +23,13 @@ describe("managed release", () => {
     assert.ok(workflow.includes("inputs.publish"))
   })
 
-  // The candidate version is fixed in one place: dispatch and tag publishes
-  // must agree, and the source metadata keeps the upstream Code tag separate.
-  it("targets the 4.145.2-kk.4 candidate without replacing the previous tag", () => {
-    assert.equal(workflow.match(/4\.145\.2-kk\.4/g)?.length, 2)
-    assert.doesNotMatch(workflow, /4\.145\.2-kk\.1/)
-    assert.ok(workflow.includes('--arg upstreamTag "v4.145.2"'))
-    assert.ok(workflow.includes("tag=v4.145.2-kk.4"))
+  // Dispatch packaging and publishing must agree on the candidate version,
+  // and the source metadata keeps the upstream code-server tag separate.
+  it("targets the 4.146.0-kk.1 candidate without replacing the previous tag", () => {
+    assert.equal(workflow.match(/4\.146\.0-kk\.1/g)?.length, 2)
+    assert.doesNotMatch(workflow, /4\.145\.2-kk\./)
+    assert.ok(workflow.includes('--arg upstreamTag "v4.146.0"'))
+    assert.ok(workflow.includes("tag=v4.146.0-kk.1"))
   })
 
   // A managed-view patch that misses a VS Code file leaves the built server
@@ -114,9 +114,7 @@ describe("managed release", () => {
     )
     assert.ok(patch.includes("refresh(reveal?: boolean): Promise<void>"))
     assert.ok(
-      patch.includes(
-        "configurationDefaults: managedView ? { 'workbench.colorTheme': 'Dark Modern' } : undefined",
-      ),
+      patch.includes("configurationDefaults: managedView ? { 'workbench.colorTheme': 'Dark Modern' } : undefined"),
     )
     assert.ok(
       patch.includes(
@@ -165,6 +163,7 @@ describe("managed release", () => {
   // The browser runner resolves --run against the selected build output and
   // can otherwise exit successfully without executing a single test.
   it("runs the built workspace snapshot suite and rejects missing or skipped cases", () => {
+    assert.ok(workflow.includes("pnpm run test-browser-no-install --build --browser chromium"))
     assert.ok(
       workflow.includes(
         "--run out-build/vs/workbench/services/configuration/test/browser/configurationService.test.js",
@@ -184,7 +183,7 @@ describe("managed release", () => {
       jobs: {
         package: {
           strategy: { matrix: { include: { asset: string }[] } }
-          steps: { name?: string; if?: string; run?: string }[]
+          steps: { name?: string; if?: string; run?: string; uses?: string; with?: Record<string, string> }[]
         }
       }
     }
@@ -196,21 +195,36 @@ describe("managed release", () => {
     const build = job.steps.find(({ name }) => name === "Build from source")!
     assert.equal(build.if, undefined)
     const commands = build.run!.split("\n").map((line) => line.trim())
-    const core = commands.indexOf("npm run gulp core-ci")
-    assert.ok(core >= 0)
+    const pnpmSetup = job.steps.findIndex(({ uses }) => uses?.startsWith("pnpm/action-setup@"))
+    const nodeSetup = job.steps.findIndex(({ uses }) => uses?.startsWith("actions/setup-node@"))
+    assert.ok(pnpmSetup >= 0 && pnpmSetup < nodeSetup)
+    assert.equal(job.steps[nodeSetup].with?.cache, "pnpm")
+    assert.deepEqual(job.steps[nodeSetup].with?.["cache-dependency-path"].trim().split("\n"), [
+      "pnpm-lock.yaml",
+      "test/pnpm-lock.yaml",
+      "test/e2e/extensions/test-extension/pnpm-lock.yaml",
+      "lib/vscode/**/pnpm-lock.yaml",
+    ])
+    const buildInstall = commands.indexOf("cd lib/vscode/build")
+    const preinstall = commands.indexOf("pnpm run preinstall")
+    const rootInstall = commands.indexOf("SKIP_SUBMODULE_DEPS=1 pnpm install --frozen-lockfile")
+    assert.ok(buildInstall >= 0 && buildInstall < preinstall && preinstall < rootInstall)
+    assert.equal(commands[buildInstall + 1], "pnpm install --frozen-lockfile")
+    assert.equal(commands[preinstall + 1], "pnpm install --frozen-lockfile")
+    const core = commands.indexOf("pnpm run gulp core-ci")
+    assert.ok(core > rootInstall)
     assert.equal(
       commands[core + 1],
       "node test/unit/node/index.js --build --run out-build/vs/server/test/node/managedViews.test.ts --timeout 30000",
     )
     const smoke = job.steps.find(({ name }) => name === "Smoke two workspaces in one server")!
     assert.equal(smoke.if, "matrix.asset == 'linux-amd64'")
-    const e2e = smoke.run!.split("\n").find((line) => line.includes("npm run test:e2e"))!
+    const e2e = smoke.run!.split("\n").find((line) => line.includes("pnpm run test:e2e"))!
     assert.deepEqual(e2e.trim().split(/\s+/), [
       'CODE_SERVER_TEST_ENTRY="$PWD/release"',
-      "npm",
+      "pnpm",
       "run",
       "test:e2e",
-      "--",
       "--project",
       "Chromium",
       "--retries",
@@ -226,6 +240,7 @@ describe("managed release", () => {
     assert.ok(workflow.includes('requireServer("@vscode/ripgrep-universal")'))
     assert.ok(workflow.includes('spawnSync(rgPath, ["--version"]'))
     assert.doesNotMatch(workflow, /"@vscode", "ripgrep", "bin"/)
+    assert.ok(workflow.includes('PNPM_CONFIG_SCRIPT_SHELL=$(cygpath -w "$(command -v bash)")'))
     assert.ok(workflow.includes("MSYS_NO_PATHCONV=1 cmd.exe /c"))
     assert.ok(workflow.includes("test -x /c/msys64/usr/bin/rsync.exe"))
   })

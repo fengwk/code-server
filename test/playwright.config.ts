@@ -3,12 +3,12 @@ import { PlaywrightTestConfig } from "@playwright/test"
 import path from "path"
 
 // The default configuration runs all tests in three browsers with workers equal
-// to half the available threads. See 'npm run test:e2e --help' to customize
+// to half the available threads. See 'pnpm run test:e2e --help' to customize
 // from the command line. For example:
-//   npm run test:e2e -- --workers 1        # Run with one worker
-//   npm run test:e2e -- --project Chromium # Only run on Chromium
-//   npm run test:e2e -- --grep login       # Run tests matching "login"
-//   PWDEBUG=1 npm run test:e2e             # Run Playwright inspector
+//   pnpm run test:e2e --workers 1        # Run with one worker
+//   pnpm run test:e2e --project Chromium # Only run on Chromium
+//   pnpm run test:e2e --grep login       # Run tests matching "login"
+//   PWDEBUG=1 pnpm run test:e2e             # Run Playwright inspector
 const config: PlaywrightTestConfig = {
   testDir: path.join(__dirname, "e2e"), // Search for tests in this directory.
   timeout: 60000, // Each test is given 60 seconds.

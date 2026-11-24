@@ -86,7 +86,7 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             version=${GITHUB_REF_NAME#v}
           else
-            version=4.145.2-kk.4
+            version=4.146.0-kk.1
           fi
           case "$version" in
             *-kk.*) ;;
@@ -129,19 +129,22 @@ jobs:
             done < patches/series
           fi
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version-file: .node-version
-          cache: npm
+          cache: pnpm
           cache-dependency-path: |
-            package-lock.json
-            test/package-lock.json
+            pnpm-lock.yaml
+            test/pnpm-lock.yaml
+            test/e2e/extensions/test-extension/pnpm-lock.yaml
+            lib/vscode/**/pnpm-lock.yaml
 
-      - name: Let Windows npm and jq run the build scripts
+      - name: Let Windows pnpm and jq run the build scripts
         if: matrix.os == 'windows'
         run: |
           set -euo pipefail
-          echo "npm_config_script_shell=$(cygpath -w "$(command -v bash)")" >> "$GITHUB_ENV"
+          echo "PNPM_CONFIG_SCRIPT_SHELL=$(cygpath -w "$(command -v bash)")" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/shim"
           cat > "$RUNNER_TEMP/shim/jq" <<'SHIM'
           #!/usr/bin/env bash
@@ -179,7 +182,7 @@ jobs:
           set -euo pipefail
           node -e 'process.stdout.write("::add-mask::" + Buffer.from(process.env.GITHUB_TOKEN).toString("base64") + "\n")'
           cd lib/vscode/build
-          npm ci
+          pnpm install --frozen-lockfile
           cd ..
           if [[ "$OS" == linux && "$ARCH" == amd64 ]]; then
             source ./build/azure-pipelines/linux/setup-env.sh
@@ -190,17 +193,18 @@ jobs:
             export VSCODE_REMOTE_CC=gcc VSCODE_REMOTE_CXX=g++
             export VSCODE_REMOTE_CXXFLAGS="-std=gnu++20"
           fi
-          node build/npm/preinstall.ts
-          npm ci
+          # Prepatch native headers with the node-gyp provided by pnpm.
+          pnpm run preinstall
+          pnpm install --frozen-lockfile
           cd ../..
-          npm ci
+          SKIP_SUBMODULE_DEPS=1 pnpm install --frozen-lockfile
           node --experimental-strip-types --test test/unit/managed-release.test.ts
           cd lib/vscode
-          npm run gulp core-ci
+          pnpm run gulp core-ci
           node test/unit/node/index.js --build --run out-build/vs/server/test/node/managedViews.test.ts --timeout 30000
           if [[ "$OS" == linux ]]; then
             ./node_modules/.bin/playwright install --with-deps chromium
-            npm run test-browser-no-install -- --build --browser chromium \
+            pnpm run test-browser-no-install --build --browser chromium \
               --run out-build/vs/workbench/services/configuration/test/browser/configurationService.test.js \
               --grep "WorkspaceService - first configuration snapshot" \
               --reporter full-json-stream | tee "$RUNNER_TEMP/workspace-snapshot-tests.log"
@@ -217,9 +221,9 @@ jobs:
             ' "$RUNNER_TEMP/workspace-snapshot-tests.log"
           fi
           cd ../..
-          npm run build
-          npm run build:vscode
-          KEEP_MODULES=1 npm run release
+          pnpm run build
+          pnpm run build:vscode
+          KEEP_MODULES=1 pnpm run release
           node --input-type=module -e '
             import { spawnSync } from "node:child_process";
             import { createRequire } from "node:module";
@@ -271,14 +275,14 @@ jobs:
             }
             fs.writeFileSync(path.join(release, "source.json"), JSON.stringify({ bundledNode, os: process.env.OS, arch: process.env.ARCH, target }));
           '
-          npm run package
+          pnpm run package
 
       - name: Record source metadata
         run: |
           set -euo pipefail
           bundled=$(jq -r .bundledNode release/source.json)
           jq -n \
-            --arg upstreamTag "v4.145.2" \
+            --arg upstreamTag "v4.146.0" \
             --arg forkCommit "$(git rev-parse HEAD)" \
             --arg submoduleCommit "$(git -C lib/vscode rev-parse HEAD)" \
             --arg buildNode "$CODE_SERVER_NODE" \
@@ -293,9 +297,8 @@ jobs:
         if: matrix.asset == 'linux-amd64'
         run: |
           set -euo pipefail
-          npm --prefix test ci
           ./test/node_modules/.bin/playwright install --with-deps chromium
-          CODE_SERVER_TEST_ENTRY="$PWD/release" npm run test:e2e -- --project Chromium --retries 0 e2e/managed-workspaces.test.ts e2e/managed-views.test.ts
+          CODE_SERVER_TEST_ENTRY="$PWD/release" pnpm run test:e2e --project Chromium --retries 0 e2e/managed-workspaces.test.ts e2e/managed-views.test.ts
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -325,7 +328,7 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             tag=$GITHUB_REF_NAME
           else
-            tag=v4.145.2-kk.4
+            tag=v4.146.0-kk.1
           fi
           version=${tag#v}
           repo=$GITHUB_REPOSITORY
