@@ -21,6 +21,8 @@ describe("managed release", () => {
     assert.doesNotMatch(workflow, /NPM_TOKEN|npm publish|id-token:|docker|nfpm|goreleaser|release-gcp/i)
     assert.ok(workflow.includes("contents: write"))
     assert.ok(workflow.includes("inputs.publish"))
+    assert.match(workflow, /git apply --whitespace=nowarn "patches\/\$patch"\n\s+done < patches\/series/)
+    assert.doesNotMatch(workflow, /quilt push|git apply[^\n]*--(?:3way|reject)/)
   })
 
   // Dispatch packaging and publishing must agree on the candidate version,

@@ -108,26 +108,22 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y quilt libkrb5-dev libwebkit2gtk-4.1-0 pkg-config python3 make g++
+          sudo apt-get install -y libkrb5-dev libwebkit2gtk-4.1-0 pkg-config python3 make g++
 
       - name: Install macOS build dependencies
         if: matrix.os == 'macos'
         run: |
-          brew install python-setuptools quilt
+          brew install python-setuptools
           # Kerberos 2.1.1 RTLD names are Linux-only; use its Darwin linker path.
           echo "GYP_DEFINES=kerberos_use_rtld=false" >> "$GITHUB_ENV"
 
       - name: Apply patches
         run: |
           set -euo pipefail
-          if command -v quilt >/dev/null; then
-            quilt push -a
-          else
-            while read -r patch; do
-              case "$patch" in '' | '#'*) continue ;; esac
-              git apply --whitespace=nowarn "patches/$patch"
-            done < patches/series
-          fi
+          while IFS= read -r patch; do
+            case "$patch" in '' | '#'*) continue ;; esac
+            git apply --whitespace=nowarn "patches/$patch"
+          done < patches/series
 
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
